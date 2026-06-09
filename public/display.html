@@ -3,110 +3,99 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI解答システム - 閲覧画面</title>
+  <title>AI解答システム</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
-    .prose-answer { line-height: 1.7; }
-    .prose-answer h1,.prose-answer h2,.prose-answer h3 { font-weight: 700; margin: .75rem 0 .25rem; }
-    .prose-answer ul,.prose-answer ol { padding-left: 1.5rem; }
-    .prose-answer ul { list-style: disc; }
-    .prose-answer ol { list-style: decimal; }
-    .prose-answer code { background: #1e293b; padding: .1em .3em; border-radius: .25em; font-size: .9em; }
-    .prose-answer pre { background: #1e293b; padding: .75rem 1rem; border-radius: .5rem; overflow-x: auto; }
-    .prose-answer pre code { background: transparent; padding: 0; }
-    .fade-in { animation: fadeIn .4s ease; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    #answer-text { transition: font-size .2s ease; }
+    .fade-in { animation: fadeIn .5s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
   </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+<body class="bg-gray-950 text-white h-screen flex flex-col overflow-hidden">
 
-  <!-- ヘッダー -->
-  <header class="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
-    <span class="font-bold text-lg tracking-tight">AI 解答システム</span>
-    <div class="flex items-center gap-3">
+  <!-- ステータスバー -->
+  <header class="shrink-0 flex items-center justify-between px-5 py-2.5 bg-gray-900 border-b border-gray-800">
+    <div class="flex items-center gap-2">
       <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-gray-600"></span>
       <span id="status-text" class="text-sm text-gray-400">接続中…</span>
     </div>
+    <!-- フォントサイズコントロール -->
+    <div id="size-controls" class="hidden items-center gap-1">
+      <span class="text-xs text-gray-500 mr-1">文字サイズ</span>
+      <button onclick="adjustSize(-1)"
+        class="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-lg leading-none">−</button>
+      <span id="size-label" class="text-xs text-gray-400 w-10 text-center"></span>
+      <button onclick="adjustSize(1)"
+        class="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 text-lg leading-none">＋</button>
+    </div>
+    <span id="room-badge" class="hidden text-xs font-mono text-gray-600"></span>
   </header>
 
-  <!-- 待機ビュー（ルーム作成後・カメラ未接続） -->
-  <section id="waiting-view" class="hidden flex-1 flex flex-col items-center justify-center gap-6 p-8">
-    <p class="text-gray-400 text-sm uppercase tracking-widest">カメラ側で読み取ってください</p>
-    <canvas id="qr-canvas" class="rounded-xl bg-white p-3"></canvas>
+  <!-- 待機ビュー -->
+  <section id="waiting-view" class="hidden flex-1 flex flex-col items-center justify-center gap-5">
+    <p class="text-gray-500 text-sm tracking-widest uppercase">カメラ側で読み取ってください</p>
+    <canvas id="qr-canvas" class="rounded-xl bg-white p-2.5"></canvas>
     <div class="text-center">
-      <p class="text-xs text-gray-500 mb-1">Room ID</p>
-      <p id="room-id-display" class="text-4xl font-mono font-bold tracking-[.3em] text-white"></p>
+      <p class="text-xs text-gray-600 mb-1">Room ID</p>
+      <p id="room-id-display" class="text-3xl font-mono font-bold tracking-[.35em]"></p>
     </div>
-    <p id="expiry-display" class="text-xs text-gray-600"></p>
+    <p id="expiry-display" class="text-xs text-gray-700"></p>
   </section>
 
-  <!-- AI処理中表示 -->
-  <section id="processing-view" class="hidden flex-1 flex flex-col items-center justify-center gap-4">
-    <svg class="w-10 h-10 animate-spin text-indigo-400" fill="none" viewBox="0 0 24 24">
+  <!-- 解析中ビュー -->
+  <section id="processing-view" class="hidden flex-1 flex flex-col items-center justify-center gap-3">
+    <svg class="w-9 h-9 animate-spin text-indigo-500" fill="none" viewBox="0 0 24 24">
       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
     </svg>
-    <p class="text-gray-400">AI が解析中…</p>
+    <p class="text-gray-500 text-sm">AI が解析中…</p>
   </section>
 
-  <!-- 解答ビュー -->
-  <section id="result-view" class="hidden flex-1 flex flex-col overflow-hidden">
-    <!-- メイン解答 -->
-    <div class="flex-1 overflow-y-auto p-6 space-y-5">
-      <div id="result-card" class="hidden fade-in bg-gray-900 rounded-2xl p-6 space-y-4">
-        <div>
-          <p class="text-xs text-indigo-400 uppercase tracking-widest mb-1">問題</p>
-          <p id="result-problem" class="text-gray-200 text-base leading-relaxed whitespace-pre-wrap"></p>
-        </div>
-        <hr class="border-gray-800">
-        <div>
-          <p class="text-xs text-indigo-400 uppercase tracking-widest mb-2">解説</p>
-          <div id="result-explanation" class="prose-answer text-gray-200 text-base"></div>
-        </div>
-        <hr class="border-gray-800">
-        <div>
-          <p class="text-xs text-emerald-400 uppercase tracking-widest mb-1">答え</p>
-          <p id="result-answer" class="text-emerald-300 text-2xl font-bold"></p>
-        </div>
-      </div>
+  <!-- 答えビュー -->
+  <section id="result-view" class="hidden flex-1 flex flex-col items-center justify-center p-8 gap-4">
+    <p id="answer-text" class="fade-in font-bold text-center leading-tight break-all text-white"></p>
+    <p id="error-text" class="hidden text-red-400 text-sm text-center"></p>
 
-      <!-- AIエラー表示 -->
-      <div id="error-card" class="hidden fade-in bg-red-950 border border-red-800 rounded-2xl p-5">
-        <p class="text-xs text-red-400 uppercase tracking-widest mb-1">エラー</p>
-        <p id="error-message" class="text-red-200 text-sm"></p>
-      </div>
-    </div>
-
-    <!-- 履歴タブ（最大5件） -->
-    <div id="history-bar" class="hidden shrink-0 border-t border-gray-800 bg-gray-900 px-4 py-2">
-      <p class="text-xs text-gray-500 mb-1.5">履歴（最新5件）</p>
-      <div id="history-list" class="flex gap-2 overflow-x-auto pb-1"></div>
+    <!-- 履歴（最新5件、答えのみ） -->
+    <div id="history-bar" class="hidden mt-4">
+      <div id="history-list" class="flex flex-wrap gap-2 justify-center"></div>
     </div>
   </section>
 
-  <!-- エラーバナー（接続系） -->
-  <div id="conn-error" class="hidden fixed bottom-4 left-4 right-4 bg-red-900 border border-red-700 rounded-xl px-4 py-3 text-sm text-red-200 text-center"></div>
+  <!-- 接続エラートースト -->
+  <div id="toast" class="hidden fixed bottom-4 inset-x-4 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-300 text-center"></div>
 
   <script>
-    // ── DOM参照 ──────────────────────────────────────────────────────────────
-    const $  = id => document.getElementById(id);
-    const statusDot  = $('status-dot');
-    const statusText = $('status-text');
+    // ── フォントサイズ ─────────────────────────────────────────────────────────
+    const SIZE_STEPS = [2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; // rem
+    let sizeIdx = parseInt(localStorage.getItem('answerSizeIdx') ?? '4'); // デフォルト 5rem
+    const answerText = document.getElementById('answer-text');
+    const sizeLabel  = document.getElementById('size-label');
+
+    function applySize() {
+      answerText.style.fontSize = SIZE_STEPS[sizeIdx] + 'rem';
+      sizeLabel.textContent = SIZE_STEPS[sizeIdx] + 'rem';
+      localStorage.setItem('answerSizeIdx', sizeIdx);
+    }
+    function adjustSize(delta) {
+      sizeIdx = Math.max(0, Math.min(SIZE_STEPS.length - 1, sizeIdx + delta));
+      applySize();
+    }
+    applySize();
+
+    // ── DOM ───────────────────────────────────────────────────────────────────
+    const $ = id => document.getElementById(id);
     const waitingView    = $('waiting-view');
     const processingView = $('processing-view');
     const resultView     = $('result-view');
-    const resultCard     = $('result-card');
-    const errorCard      = $('error-card');
+    const sizeControls   = $('size-controls');
     const historyBar     = $('history-bar');
     const historyList    = $('history-list');
-    const connError      = $('conn-error');
+    const toast          = $('toast');
 
-    // ── 状態 ─────────────────────────────────────────────────────────────────
-    let roomId = null;
-    const history = [];  // { problem, explanation, answer }
+    let history = []; // 最新5件の答え
 
     // ── Socket.io ─────────────────────────────────────────────────────────────
     const socket = io();
@@ -115,85 +104,79 @@
       setStatus('dot-gray', 'ルーム作成中…');
       socket.emit('create_room');
     });
-
     socket.on('disconnect', () => setStatus('dot-red', '切断されました'));
 
-    socket.on('room_created', ({ roomId: id, expiresAt }) => {
-      roomId = id;
-      $('room-id-display').textContent = id;
+    socket.on('room_created', ({ roomId, expiresAt }) => {
+      $('room-id-display').textContent = roomId;
+      $('room-badge').textContent = roomId;
       const exp = new Date(expiresAt);
       $('expiry-display').textContent = `有効期限: ${exp.getHours()}:${String(exp.getMinutes()).padStart(2,'0')}`;
-      const cameraUrl = `${location.origin}/camera.html?room=${id}`;
-      QRCode.toCanvas($('qr-canvas'), cameraUrl, { width: 220, margin: 1, color: { dark: '#000', light: '#fff' } });
+      QRCode.toCanvas($('qr-canvas'), `${location.origin}/camera.html?room=${roomId}`, {
+        width: 200, margin: 1, color: { dark: '#000', light: '#fff' }
+      });
       showView('waiting');
       setStatus('dot-yellow', 'カメラ接続待ち');
     });
 
     socket.on('camera_connected', () => {
       setStatus('dot-green', 'カメラ接続済み');
+      $('room-badge').classList.remove('hidden');
       showView('result');
-      showInfo('カメラが接続されました。問題用紙をかざしてください。');
+      $('answer-text').textContent = '問題用紙をかざしてください';
+      $('answer-text').classList.remove('fade-in');
+      sizeControls.classList.remove('hidden');
+      sizeControls.classList.add('flex');
     });
 
     socket.on('camera_disconnected', () => {
       setStatus('dot-yellow', 'カメラ切断 — 再接続待ち');
-      showConnError('カメラが切断されました。');
+      showToast('カメラが切断されました。');
     });
 
     socket.on('ai_processing_start', () => {
-      resultCard.classList.add('hidden');
-      errorCard.classList.add('hidden');
       showView('processing');
-      setStatus('dot-indigo', 'AI が解析中…');
+      setStatus('dot-indigo', 'AI 解析中…');
     });
 
-    socket.on('ai_result_ready', (data) => {
+    socket.on('ai_result_ready', ({ answer }) => {
       showView('result');
-      renderResult(data);
-      pushHistory(data);
+      $('error-text').classList.add('hidden');
+
+      // フェードイン再トリガー
+      answerText.classList.remove('fade-in');
+      void answerText.offsetWidth;
+      answerText.classList.add('fade-in');
+      answerText.textContent = answer;
+
+      pushHistory(answer);
       setStatus('dot-green', '解答完了');
     });
 
     socket.on('ai_error', ({ message }) => {
       showView('result');
-      $('error-message').textContent = message;
-      errorCard.classList.remove('hidden');
-      resultCard.classList.add('hidden');
+      answerText.textContent = '';
+      $('error-text').textContent = message;
+      $('error-text').classList.remove('hidden');
       setStatus('dot-red', 'AIエラー');
     });
 
-    socket.on('error_occurred', ({ message }) => {
-      showConnError(message);
-    });
-
+    socket.on('error_occurred', ({ message }) => showToast(message));
     socket.on('room_expired', () => {
-      showConnError('ルームの有効期限が切れました。ページを再読み込みしてください。');
+      showToast('ルームの有効期限が切れました。ページを再読み込みしてください。');
       setStatus('dot-red', '期限切れ');
     });
 
     // ── UI ───────────────────────────────────────────────────────────────────
     function showView(name) {
-      waitingView.classList.toggle('hidden', name !== 'waiting');
-      waitingView.classList.toggle('flex', name === 'waiting');
-      processingView.classList.toggle('hidden', name !== 'processing');
-      processingView.classList.toggle('flex', name === 'processing');
-      resultView.classList.toggle('hidden', name !== 'result');
-      resultView.classList.toggle('flex', name === 'result');
+      const views = { waiting: waitingView, processing: processingView, result: resultView };
+      for (const [k, el] of Object.entries(views)) {
+        el.classList.toggle('hidden', k !== name);
+        el.classList.toggle('flex', k === name);
+      }
     }
 
-    function renderResult({ problem, explanation, answer }) {
-      resultCard.classList.remove('hidden');
-      errorCard.classList.add('hidden');
-      resultCard.classList.remove('fade-in');
-      void resultCard.offsetWidth; // reflow for re-trigger
-      resultCard.classList.add('fade-in');
-      $('result-problem').textContent = problem;
-      $('result-explanation').innerHTML = marked.parse(explanation || '');
-      $('result-answer').textContent = answer;
-    }
-
-    function pushHistory(data) {
-      history.unshift(data);
+    function pushHistory(answer) {
+      history.unshift(answer);
       if (history.length > 5) history.pop();
       renderHistory();
     }
@@ -202,31 +185,29 @@
       if (history.length <= 1) { historyBar.classList.add('hidden'); return; }
       historyBar.classList.remove('hidden');
       historyList.innerHTML = '';
-      history.forEach((item, i) => {
+      history.forEach((ans, i) => {
         const btn = document.createElement('button');
-        btn.className = `shrink-0 px-3 py-1.5 rounded-lg text-xs ${i === 0 ? 'bg-indigo-700 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`;
-        const short = item.problem.slice(0, 18) + (item.problem.length > 18 ? '…' : '');
+        btn.className = `px-3 py-1 rounded-lg text-sm ${i === 0 ? 'bg-indigo-700 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`;
+        const short = ans.slice(0, 20) + (ans.length > 20 ? '…' : '');
         btn.textContent = `#${history.length - i} ${short}`;
-        btn.onclick = () => renderResult(item);
+        btn.onclick = () => {
+          answerText.classList.remove('fade-in');
+          void answerText.offsetWidth;
+          answerText.classList.add('fade-in');
+          answerText.textContent = ans;
+        };
         historyList.appendChild(btn);
       });
     }
 
-    function showInfo(msg) {
-      connError.textContent = msg;
-      connError.classList.remove('hidden', 'bg-red-900', 'border-red-700', 'text-red-200');
-      connError.classList.add('bg-gray-800', 'border-gray-600', 'text-gray-200');
-      setTimeout(() => connError.classList.add('hidden'), 4000);
+    function showToast(msg) {
+      toast.textContent = msg;
+      toast.classList.remove('hidden');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => toast.classList.add('hidden'), 5000);
     }
 
-    function showConnError(msg) {
-      connError.textContent = msg;
-      connError.classList.remove('hidden', 'bg-gray-800', 'border-gray-600', 'text-gray-200');
-      connError.classList.add('bg-red-900', 'border-red-700', 'text-red-200');
-      setTimeout(() => connError.classList.add('hidden'), 6000);
-    }
-
-    const STATUS_CLASSES = {
+    const STATUS_COLORS = {
       'dot-gray':   'bg-gray-500',
       'dot-yellow': 'bg-yellow-400',
       'dot-green':  'bg-emerald-400',
@@ -234,8 +215,8 @@
       'dot-indigo': 'bg-indigo-400',
     };
     function setStatus(dot, text) {
-      statusDot.className = `w-2.5 h-2.5 rounded-full ${STATUS_CLASSES[dot] || 'bg-gray-500'}`;
-      statusText.textContent = text;
+      $('status-dot').className = `w-2.5 h-2.5 rounded-full ${STATUS_COLORS[dot] || 'bg-gray-500'}`;
+      $('status-text').textContent = text;
     }
   </script>
 </body>
