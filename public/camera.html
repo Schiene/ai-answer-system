@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AI解答システム - カメラ</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    #video { object-fit: cover; }
+    .cooldown-ring { stroke-dasharray: 88; stroke-dashoffset: 88; transition: stroke-dashoffset 1s linear; }
+  </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen flex flex-col select-none">
+
+  <!-- ルーム参加フォーム -->
+  <section id="join-view" class="flex-1 flex flex-col items-center justify-center p-8 gap-6">
+    <h1 class="text-xl font-bold">AI 解答システム</h1>
+    <p class="text-gray-400 text-sm text-center">表示画面のQRコードをスキャンするか、<br>Room IDを入力して参加してください。</p>
+    <input id="room-input" type="text" maxlength="12" placeholder="Room ID"
+      class="w-full max-w-xs text-center uppercase tracking-[.3em] text-xl bg-gray-800 border border-gray-600 rounded-xl px-4 py-3 focus:outline-none focus:border-indigo-500 placeholder-gray-600 font-mono">
+    <button id="join-btn"
+      class="w-full max-w-xs bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl transition-colors">
+      参加する
+    </button>
+    <p id="join-error" class="text-red-400 text-sm hidden"></p>
+  </section>
+
+  <!-- カメラビュー -->
+  <section id="camera-view" class="hidden flex-1 flex flex-col">
+    <!-- ステータスバー -->
+    <div class="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800 shrink-0">
+      <div class="flex items-center gap-2">
+        <span id="cam-status-dot" class="w-2.5 h-2.5 rounded-full bg-yellow-400"></span>
+        <span id="cam-status-text" class="text-sm text-gray-300">準備中…</span>
+      </div>
+      <span id="room-label" class="text-xs font-mono text-gray-500"></span>
+    </div>
+
+    <!-- ビデオプレビュー -->
+    <div class="relative flex-1 bg-black overflow-hidden">
+      <video id="video" class="w-full h-full" autoplay playsinline muted></video>
+      <!-- 差分レベルオーバーレイ -->
+      <div class="absolute top-2 right-2 bg-black/60 rounded-lg px-2 py-1 text-xs text-gray-300 font-mono">
+        Δ <span id="diff-value">0.0</span>
+      </div>
+      <!-- 安定フレームカウンター -->
+      <div class="absolute top-2 left-2 bg-black/60 rounded-lg px-2 py-1 text-xs text-gray-300 font-mono">
+        安定 <span id="stable-count">0</span>/<span id="stable-req">4</span>
+      </div>
+    </div>
+
+    <!-- 下部コントロール -->
+    <div class="shrink-0 bg-gray-900 border-t border-gray-800 px-4 py-3 flex items-center gap-4">
+      <!-- 送信済みサムネイル -->
+      <div class="shrink-0">
+        <p class="text-xs text-gray-500 mb-1">最後の送信</p>
+        <img id="last-thumb" src="" alt=""
+          class="w-14 h-10 object-cover rounded-lg border border-gray-700 bg-gray-800 hidden">
+        <div id="thumb-placeholder" class="w-14 h-10 rounded-lg border border-gray-700 bg-gray-800 flex items-center justify-center">
+          <span class="text-gray-600 text-xs">なし</span>
+        </div>
+      </div>
+
+      <!-- クールダウン表示 -->
+      <div class="flex-1 flex items-center gap-3">
+        <svg class="w-8 h-8 -rotate-90 shrink-0" viewBox="0 0 30 30">
+          <circle cx="15" cy="15" r="14" fill="none" stroke="#374151" stroke-width="3"/>
+          <circle id="cooldown-ring" cx="15" cy="15" r="14" fill="none" stroke="#6366f1" stroke-width="3"
+            class="cooldown-ring" style="stroke-dasharray:88;stroke-dashoffset:88"/>
+        </svg>
+        <div>
+          <p class="text-sm font-medium" id="action-text">カメラ起動中…</p>
+          <p class="text-xs text-gray-500" id="cooldown-text"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 非表示キャンバス（差分検知用） -->
+  <canvas id="diff-canvas" class="hidden"></canvas>
+
+  <script>
+    // ── 設定 ──────────────────────────────────────────────────────────────────
+    const DIFF_W            = 320;
+    const DIFF_H            = 240;
+    const DIFF_INTERVAL_MS  = 500;   // フレーム比較間隔
+    const DIFF_THRESHOLD    = 8;     // 平均ピクセル変化の閾値（0〜255）
+    const STABLE_REQUIRED   = 4;     // 安定判定に必要な連続フレーム数
+    const COOLDOWN_MS       = 10_000;// 送信後のクールダウン
+    const SEND_MAX_SIDE     = 1280;  // 送信画像の最大辺（px）
+    const SEND_QUALITY      = 0.75;  // JPEG圧縮品質
+
+    // ── DOM参照 ───────────────────────────────────────────────────────────────
+    const $ = id => document.getElementById(id);
+    const joinView    = $('join-view');
+    const cameraView  = $('camera-view');
+    const roomInput   = $('room-input');
+    const joinBtn     = $('join-btn');
+    const joinError   = $('join-error');
+    const video       = $('video');
+    const diffCanvas  = $('diff-canvas');
+    const diffCtx     = diffCanvas.getContext('2d', { willReadFrequently: true });
+    const stableCountEl = $('stable-count');
+    const stableReqEl   = $('stable-req');
+    const diffValueEl   = $('diff-value');
+    const cooldownRing  = $('cooldown-ring');
+    const cooldownText  = $('cooldown-text');
+    const actionText    = $('action-text');
+    const lastThumb     = $('last-thumb');
+    const thumbPlaceholder = $('thumb-placeholder');
+
+    stableReqEl.textContent = STABLE_REQUIRED;
+
+    // ── 状態 ──────────────────────────────────────────────────────────────────
+    let roomId        = null;
+    let socket        = null;
+    let prevFrameData = null;
+    let stableFrames  = 0;
+    let wasMoving     = false;
+    let cooldownUntil = 0;
+    let diffTimer     = null;
+    let cooldownTimer = null;
+
+    // ── URLパラメータ自動読み込み ─────────────────────────────────────────────
+    const urlRoom = new URLSearchParams(location.search).get('room');
+    if (urlRoom) {
+      roomInput.value = urlRoom.toUpperCase();
+      // 少し遅延してから自動接続（ページ描画後）
+      window.addEventListener('load', () => setTimeout(connectSocket, 100));
+    }
+
+    joinBtn.addEventListener('click', connectSocket);
+    roomInput.addEventListener('keydown', e => { if (e.key === 'Enter') connectSocket(); });
+
+    function connectSocket() {
+      const id = roomInput.value.trim().toUpperCase();
+      if (!id) { showJoinError('Room IDを入力してください。'); return; }
+      roomId = id;
+      joinError.classList.add('hidden');
+      joinBtn.disabled = true;
+      joinBtn.textContent = '接続中…';
+
+      socket = io();
+
+      socket.on('connect', () => {
+        socket.emit('join_room', { roomId });
+      });
+
+      socket.on('join_ack', ({ roomId: id }) => {
+        $('room-label').textContent = `Room: ${id}`;
+        joinView.classList.add('hidden');
+        cameraView.classList.remove('hidden');
+        cameraView.classList.add('flex');
+        startCamera();
+      });
+
+      socket.on('error_occurred', ({ code, message }) => {
+        joinBtn.disabled = false;
+        joinBtn.textContent = '参加する';
+        showJoinError(message);
+        socket.disconnect();
+        socket = null;
+      });
+
+      socket.on('disconnect', () => {
+        setCamStatus('dot-red', '切断されました');
+      });
+    }
+
+    function showJoinError(msg) {
+      joinError.textContent = msg;
+      joinError.classList.remove('hidden');
+    }
+
+    // ── カメラ起動 ────────────────────────────────────────────────────────────
+    async function startCamera() {
+      setCamStatus('dot-yellow', 'カメラを起動中…');
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await new Promise(r => video.onloadedmetadata = r);
+        diffCanvas.width  = DIFF_W;
+        diffCanvas.height = DIFF_H;
+        setCamStatus('dot-green', '撮影中');
+        actionText.textContent = '問題用紙をかざしてください';
+        startDiffLoop();
+      } catch (err) {
+        setCamStatus('dot-red', 'カメラエラー');
+        actionText.textContent = `カメラを起動できません: ${err.message}`;
+      }
+    }
+
+    // ── 差分検知ループ ────────────────────────────────────────────────────────
+    function startDiffLoop() {
+      diffTimer = setInterval(checkFrame, DIFF_INTERVAL_MS);
+    }
+
+    function checkFrame() {
+      if (video.readyState < 2) return;
+
+      diffCtx.drawImage(video, 0, 0, DIFF_W, DIFF_H);
+      const curr = diffCtx.getImageData(0, 0, DIFF_W, DIFF_H).data;
+
+      if (!prevFrameData) {
+        prevFrameData = new Uint8ClampedArray(curr);
+        return;
+      }
+
+      // ピクセル差分（RGB3チャンネル）
+      let total = 0;
+      for (let i = 0; i < curr.length; i += 4) {
+        total += Math.abs(curr[i]   - prevFrameData[i]);
+        total += Math.abs(curr[i+1] - prevFrameData[i+1]);
+        total += Math.abs(curr[i+2] - prevFrameData[i+2]);
+      }
+      const avgDiff = total / (DIFF_W * DIFF_H * 3);
+      prevFrameData.set(curr);
+
+      diffValueEl.textContent = avgDiff.toFixed(1);
+
+      const now = Date.now();
+      if (avgDiff > DIFF_THRESHOLD) {
+        // 動き検知
+        stableFrames = 0;
+        wasMoving = true;
+        setCamStatus('dot-yellow', '動きを検知…');
+        actionText.textContent = '静止するまで待機中…';
+      } else {
+        // 安定フレーム
+        if (stableFrames < STABLE_REQUIRED) stableFrames++;
+      }
+      stableCountEl.textContent = stableFrames;
+
+      // 安定判定: 動いた後に STABLE_REQUIRED 回連続して安定
+      if (wasMoving && stableFrames >= STABLE_REQUIRED && now >= cooldownUntil) {
+        wasMoving = false;
+        stableFrames = 0;
+        sendFrame();
+      }
+    }
+
+    // ── 画像送信 ──────────────────────────────────────────────────────────────
+    function sendFrame() {
+      if (!socket || !roomId) return;
+
+      // 送信用キャンバスを一時生成
+      const sw = video.videoWidth;
+      const sh = video.videoHeight;
+      const scale = Math.min(1, SEND_MAX_SIDE / Math.max(sw, sh));
+      const tw = Math.round(sw * scale);
+      const th = Math.round(sh * scale);
+
+      const sendCanvas = document.createElement('canvas');
+      sendCanvas.width  = tw;
+      sendCanvas.height = th;
+      sendCanvas.getContext('2d').drawImage(video, 0, 0, tw, th);
+      const imageData = sendCanvas.toDataURL('image/jpeg', SEND_QUALITY);
+
+      // サムネイル更新
+      lastThumb.src = imageData;
+      lastThumb.classList.remove('hidden');
+      thumbPlaceholder.classList.add('hidden');
+
+      socket.emit('image_captured', { roomId, imageData }, (ack) => {
+        if (ack?.ok) {
+          setCamStatus('dot-indigo', 'AI解析中…');
+          actionText.textContent = 'AIが解答を作成中…';
+          startCooldown();
+        } else if (ack?.error === 'RATE_LIMITED') {
+          actionText.textContent = 'クールダウン中（送信をスキップ）';
+        }
+      });
+    }
+
+    function startCooldown() {
+      cooldownUntil = Date.now() + COOLDOWN_MS;
+      if (cooldownTimer) clearInterval(cooldownTimer);
+
+      cooldownTimer = setInterval(() => {
+        const remaining = cooldownUntil - Date.now();
+        if (remaining <= 0) {
+          clearInterval(cooldownTimer);
+          cooldownTimer = null;
+          cooldownRing.style.strokeDashoffset = '88';
+          cooldownText.textContent = '';
+          setCamStatus('dot-green', '撮影中');
+          actionText.textContent = '問題用紙をかざしてください';
+          return;
+        }
+        const progress = 1 - remaining / COOLDOWN_MS;
+        cooldownRing.style.strokeDashoffset = String(88 * (1 - progress));
+        cooldownText.textContent = `再送信まで ${Math.ceil(remaining / 1000)}秒`;
+      }, 200);
+    }
+
+    // ── ステータス ────────────────────────────────────────────────────────────
+    const STATUS_COLORS = {
+      'dot-yellow': 'bg-yellow-400',
+      'dot-green':  'bg-emerald-400',
+      'dot-red':    'bg-red-400',
+      'dot-indigo': 'bg-indigo-400',
+    };
+    function setCamStatus(dot, text) {
+      const el = $('cam-status-dot');
+      el.className = `w-2.5 h-2.5 rounded-full ${STATUS_COLORS[dot] || 'bg-gray-500'}`;
+      $('cam-status-text').textContent = text;
+    }
+  </script>
+</body>
+</html>
