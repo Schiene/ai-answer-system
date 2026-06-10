@@ -63,6 +63,12 @@ const ANSWER_SCHEMA = {
   required: ['problem', 'explanation', 'answer'],
 };
 
+// 429 エラーからリトライ待機時間(ms)を取り出す
+function parseRetryDelay(err) {
+  const match = err?.message?.match(/retry[^"]*"?(\d+)s/i);
+  return match ? parseInt(match[1]) * 1000 : 15_000;
+}
+
 async function analyzeImage(base64Jpeg) {
   const model = genAI.getGenerativeModel({
     model: GEMINI_MODEL,
@@ -71,11 +77,26 @@ async function analyzeImage(base64Jpeg) {
       responseSchema: ANSWER_SCHEMA,
     },
   });
-  const result = await model.generateContent([
+  const call = () => model.generateContent([
     '画像にある問題を認識し、解法と答えを出力してください。',
     { inlineData: { data: base64Jpeg, mimeType: 'image/jpeg' } },
   ]);
-  return JSON.parse(result.response.text());
+
+  let res;
+  try {
+    res = await call();
+  } catch (err) {
+    // レート制限の場合は一度だけ自動リトライ
+    if (err?.message?.includes('429')) {
+      const delay = parseRetryDelay(err);
+      console.warn(`[ai] rate limited, retrying in ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+      res = await call();
+    } else {
+      throw err;
+    }
+  }
+  return JSON.parse(res.response.text());
 }
 
 // ── ルーム管理 ───────────────────────────────────────────────────────────────
@@ -179,8 +200,14 @@ io.on('connection', (socket) => {
       console.log(`[ai] result sent to room: ${roomId}`);
     } catch (err) {
       console.error('[ai] error:', err.message);
+      let userMsg = 'AI処理中にエラーが発生しました。';
+      if (err?.message?.includes('429')) {
+        userMsg = 'APIの使用量制限に達しました。しばらく待ってから再試行してください。';
+      } else if (err?.message?.includes('API_KEY') || err?.message?.includes('403')) {
+        userMsg = 'APIキーが無効です。Render の環境変数を確認してください。';
+      }
       io.to(roomId).emit('ai_error', {
-        message: err?.message || 'AI処理中にエラーが発生しました。',
+        message: userMsg,
       });
     }
   });
