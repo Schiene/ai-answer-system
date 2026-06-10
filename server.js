@@ -34,6 +34,18 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime() });
 });
 
+// Gemini API 疎通確認（デバッグ用）
+app.get('/test-ai', async (_req, res) => {
+  try {
+    const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+    const result = await model.generateContent('日本語で「テスト成功」とだけ答えてください。');
+    const text = result.response.text().trim();
+    res.json({ ok: true, model: GEMINI_MODEL, text });
+  } catch (err) {
+    res.json({ ok: false, model: GEMINI_MODEL, error: err.message });
+  }
+});
+
 // ── HTTPS / HTTP 自動切り替え ─────────────────────────────────────────────
 let server;
 if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
@@ -186,7 +198,7 @@ io.on('connection', (socket) => {
       console.log(`[ai] result sent to room: ${roomId}`);
     } catch (err) {
       console.error('[ai] error:', err.message);
-      let userMsg = 'AI処理中にエラーが発生しました。';
+      let userMsg = `AI処理エラー: ${err?.message || '不明なエラー'}`;
       if (err?.message?.includes('429')) {
         userMsg = 'APIの使用量制限に達しました。しばらく待ってから再試行してください。';
       } else if (err?.message?.includes('API_KEY') || err?.message?.includes('403')) {
