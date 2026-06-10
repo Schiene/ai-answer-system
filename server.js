@@ -21,7 +21,7 @@ const PORT           = parseInt(process.env.PORT              || '3001');
 const ROOM_ID_LENGTH = parseInt(process.env.ROOM_ID_LENGTH    || '10');
 const ROOM_EXPIRY_MS = parseInt(process.env.ROOM_EXPIRY_MINUTES || '60') * 60 * 1000;
 const RATE_LIMIT_MS  = parseInt(process.env.RATE_LIMIT_SECONDS  || '10') * 1000;
-const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const SSL_CERT       = process.env.SSL_CERT_PATH;
 const SSL_KEY        = process.env.SSL_KEY_PATH;
 
@@ -31,7 +31,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ヘルスチェック（Render / ロードバランサー向け）
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime() });
+  res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), model: GEMINI_MODEL });
 });
 
 // Gemini API 疎通確認（デバッグ用）
