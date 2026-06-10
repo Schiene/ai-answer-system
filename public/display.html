@@ -98,7 +98,7 @@
     let history = []; // 最新5件の答え
 
     // ── Socket.io ─────────────────────────────────────────────────────────────
-    const socket = io();
+    const socket = io({ transports: ['websocket'] });
 
     socket.on('connect', () => {
       setStatus('dot-gray', 'ルーム作成中…');

@@ -112,7 +112,7 @@
       $('join-btn').disabled = true;
       $('join-btn').textContent = '接続中…';
 
-      socket = io();
+      socket = io({ transports: ['websocket'] });
 
       socket.on('connect', () => socket.emit('join_room', { roomId }));
 
