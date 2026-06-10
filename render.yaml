@@ -17,4 +17,4 @@ services:
       - key: ROOM_EXPIRY_MINUTES
         value: "60"
       - key: RATE_LIMIT_SECONDS
-        value: "10"
+        value: "20"
