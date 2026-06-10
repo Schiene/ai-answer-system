@@ -53,16 +53,6 @@ const io = new Server(server);
 // ── Gemini API ───────────────────────────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const ANSWER_SCHEMA = {
-  type: 'object',
-  properties: {
-    problem:     { type: 'string', description: '認識した問題文' },
-    explanation: { type: 'string', description: '解法と詳細な解説（Markdown可）' },
-    answer:      { type: 'string', description: '最終的な答え' },
-  },
-  required: ['problem', 'explanation', 'answer'],
-};
-
 // 429 エラーからリトライ待機時間(ms)を取り出す
 function parseRetryDelay(err) {
   const match = err?.message?.match(/retry[^"]*"?(\d+)s/i);
@@ -70,15 +60,9 @@ function parseRetryDelay(err) {
 }
 
 async function analyzeImage(base64Jpeg) {
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: ANSWER_SCHEMA,
-    },
-  });
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const call = () => model.generateContent([
-    '画像にある問題を認識し、解法と答えを出力してください。',
+    '画像に写っている問題を解き、答えだけを簡潔に出力してください。解説や問題文は不要です。',
     { inlineData: { data: base64Jpeg, mimeType: 'image/jpeg' } },
   ]);
 
@@ -96,7 +80,9 @@ async function analyzeImage(base64Jpeg) {
       throw err;
     }
   }
-  return JSON.parse(res.response.text());
+  const answer = res.response.text().trim();
+  if (!answer) throw new Error('AIから回答が得られませんでした');
+  return { answer };
 }
 
 // ── ルーム管理 ───────────────────────────────────────────────────────────────
