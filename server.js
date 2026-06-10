@@ -10,23 +10,37 @@ const crypto = require('crypto');
 const { Server } = require('socket.io');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
+// ── 起動時バリデーション ───────────────────────────────────────────────────────
+if (!process.env.GEMINI_API_KEY) {
+  console.error('[fatal] GEMINI_API_KEY が設定されていません。.env を確認してください。');
+  process.exit(1);
+}
+
 // ── 設定 ────────────────────────────────────────────────────────────────────
-const PORT              = parseInt(process.env.PORT              || '3001');
-const ROOM_ID_LENGTH    = parseInt(process.env.ROOM_ID_LENGTH    || '10');
-const ROOM_EXPIRY_MS    = parseInt(process.env.ROOM_EXPIRY_MINUTES|| '60') * 60 * 1000;
-const RATE_LIMIT_MS     = parseInt(process.env.RATE_LIMIT_SECONDS || '10') * 1000;
-const GEMINI_MODEL      = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-const SSL_CERT          = process.env.SSL_CERT_PATH;
-const SSL_KEY           = process.env.SSL_KEY_PATH;
+const PORT           = parseInt(process.env.PORT              || '3001');
+const ROOM_ID_LENGTH = parseInt(process.env.ROOM_ID_LENGTH    || '10');
+const ROOM_EXPIRY_MS = parseInt(process.env.ROOM_EXPIRY_MINUTES || '60') * 60 * 1000;
+const RATE_LIMIT_MS  = parseInt(process.env.RATE_LIMIT_SECONDS  || '10') * 1000;
+const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const SSL_CERT       = process.env.SSL_CERT_PATH;
+const SSL_KEY        = process.env.SSL_KEY_PATH;
 
 // ── Express ──────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ヘルスチェック（Render / ロードバランサー向け）
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime() });
+});
+
 // ── HTTPS / HTTP 自動切り替え ─────────────────────────────────────────────
 let server;
 if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
-  server = https.createServer({ cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) }, app);
+  server = https.createServer(
+    { cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) },
+    app,
+  );
   console.log('[server] HTTPS mode');
 } else {
   server = http.createServer(app);
@@ -37,7 +51,7 @@ if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
 const io = new Server(server);
 
 // ── Gemini API ───────────────────────────────────────────────────────────────
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const ANSWER_SCHEMA = {
   type: 'object',
@@ -65,7 +79,6 @@ async function analyzeImage(base64Jpeg) {
 }
 
 // ── ルーム管理 ───────────────────────────────────────────────────────────────
-// rooms: Map<roomId, { displaySocketId, cameraSocketId, createdAt, lastImageAt }>
 const rooms = new Map();
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -78,7 +91,7 @@ function generateRoomId() {
 }
 
 // 期限切れルームを定期削除
-setInterval(() => {
+const expiryInterval = setInterval(() => {
   const now = Date.now();
   for (const [roomId, room] of rooms) {
     if (now - room.createdAt >= ROOM_EXPIRY_MS) {
@@ -92,8 +105,6 @@ setInterval(() => {
 
 // ── Socket.io イベント ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log(`[socket] connected: ${socket.id}`);
-
   // Display → Backend: ルーム作成
   socket.on('create_room', () => {
     let roomId;
@@ -101,16 +112,18 @@ io.on('connection', (socket) => {
     do { roomId = generateRoomId(); tries++; }
     while (rooms.has(roomId) && tries < 20);
 
-    const room = { displaySocketId: socket.id, cameraSocketId: null, createdAt: Date.now(), lastImageAt: 0 };
+    const room = {
+      displaySocketId: socket.id,
+      cameraSocketId: null,
+      createdAt: Date.now(),
+      lastImageAt: 0,
+    };
     rooms.set(roomId, room);
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.role   = 'display';
 
-    socket.emit('room_created', {
-      roomId,
-      expiresAt: room.createdAt + ROOM_EXPIRY_MS,
-    });
+    socket.emit('room_created', { roomId, expiresAt: room.createdAt + ROOM_EXPIRY_MS });
     console.log(`[room] created: ${roomId}`);
   });
 
@@ -118,12 +131,18 @@ io.on('connection', (socket) => {
   socket.on('join_room', ({ roomId }) => {
     const room = rooms.get(roomId);
     if (!room) {
-      socket.emit('error_occurred', { code: 'ROOM_NOT_FOUND', message: 'ルームが見つかりません。IDを確認してください。' });
+      socket.emit('error_occurred', {
+        code: 'ROOM_NOT_FOUND',
+        message: 'ルームが見つかりません。IDを確認してください。',
+      });
       return;
     }
     if (Date.now() - room.createdAt >= ROOM_EXPIRY_MS) {
       rooms.delete(roomId);
-      socket.emit('error_occurred', { code: 'ROOM_EXPIRED', message: 'ルームの有効期限が切れています。' });
+      socket.emit('error_occurred', {
+        code: 'ROOM_EXPIRED',
+        message: 'ルームの有効期限が切れています。',
+      });
       return;
     }
     room.cameraSocketId = socket.id;
@@ -189,4 +208,18 @@ io.on('connection', (socket) => {
 server.listen(PORT, () => {
   const proto = (SSL_CERT && SSL_KEY) ? 'https' : 'http';
   console.log(`[server] listening on ${proto}://localhost:${PORT}`);
+  console.log(`[server] model: ${GEMINI_MODEL}`);
 });
+
+// ── グレースフルシャットダウン ────────────────────────────────────────────────
+function shutdown(signal) {
+  console.log(`[server] ${signal} received, shutting down…`);
+  clearInterval(expiryInterval);
+  server.close(() => {
+    console.log('[server] HTTP server closed.');
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
