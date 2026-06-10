@@ -37,6 +37,7 @@
   <section id="waiting-view" class="hidden flex-1 flex flex-col items-center justify-center gap-5">
     <p class="text-gray-500 text-sm tracking-widest uppercase">カメラ側で読み取ってください</p>
     <canvas id="qr-canvas" class="rounded-xl bg-white p-2.5"></canvas>
+    <p id="qr-fallback" class="hidden text-xs text-gray-400 break-all text-center max-w-xs px-4"></p>
     <div class="text-center">
       <p class="text-xs text-gray-600 mb-1">Room ID</p>
       <p id="room-id-display" class="text-3xl font-mono font-bold tracking-[.35em]"></p>
@@ -111,11 +112,23 @@
       $('room-badge').textContent = roomId;
       const exp = new Date(expiresAt);
       $('expiry-display').textContent = `有効期限: ${exp.getHours()}:${String(exp.getMinutes()).padStart(2,'0')}`;
-      QRCode.toCanvas($('qr-canvas'), `${location.origin}/camera.html?room=${roomId}`, {
-        width: 200, margin: 1, color: { dark: '#000', light: '#fff' }
-      });
+
+      // 先にビューを表示してからQRコード生成（QR失敗でも画面が止まらないように）
       showView('waiting');
       setStatus('dot-yellow', 'カメラ接続待ち');
+
+      const cameraUrl = `${location.origin}/camera.html?room=${roomId}`;
+      try {
+        if (typeof QRCode !== 'undefined') {
+          QRCode.toCanvas($('qr-canvas'), cameraUrl, {
+            width: 200, margin: 1, color: { dark: '#000', light: '#fff' }
+          });
+        } else {
+          _showQrFallback(cameraUrl);
+        }
+      } catch (_) {
+        _showQrFallback(cameraUrl);
+      }
     });
 
     socket.on('camera_connected', () => {
@@ -198,6 +211,13 @@
         };
         historyList.appendChild(btn);
       });
+    }
+
+    function _showQrFallback(url) {
+      $('qr-canvas').classList.add('hidden');
+      const fb = $('qr-fallback');
+      fb.textContent = url;
+      fb.classList.remove('hidden');
     }
 
     function showToast(msg) {
