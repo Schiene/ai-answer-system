@@ -100,14 +100,24 @@
 
     // ── Socket.io ─────────────────────────────────────────────────────────────
     const socket = io({ transports: ['websocket'] });
+    let activeRoomId = null;
 
     socket.on('connect', () => {
-      setStatus('dot-gray', 'ルーム作成中…');
+      if (activeRoomId) {
+        // 再接続時はQRコード画面に戻らず、サーバー側で新ルームを作り直す
+        setStatus('dot-gray', '再接続中…ルーム再作成');
+        activeRoomId = null;
+      } else {
+        setStatus('dot-gray', 'ルーム作成中…');
+      }
       socket.emit('create_room');
     });
-    socket.on('disconnect', () => setStatus('dot-red', '切断されました'));
+    socket.on('disconnect', () => {
+      setStatus('dot-red', '切断されました — 自動再接続中…');
+    });
 
     socket.on('room_created', ({ roomId, expiresAt }) => {
+      activeRoomId = roomId;
       $('room-id-display').textContent = roomId;
       $('room-badge').textContent = roomId;
       const exp = new Date(expiresAt);

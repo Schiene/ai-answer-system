@@ -1,6 +1,10 @@
 'use strict';
 require('dotenv').config();
 
+// サーバークラッシュ防止
+process.on('uncaughtException',  (err) => console.error('[fatal] uncaughtException:', err.message));
+process.on('unhandledRejection', (reason) => console.error('[fatal] unhandledRejection:', reason));
+
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -136,6 +140,7 @@ io.on('connection', (socket) => {
       cameraSocketId: null,
       createdAt: Date.now(),
       lastImageAt: 0,
+      processing: false,
     };
     rooms.set(roomId, room);
     socket.join(roomId);
@@ -182,11 +187,12 @@ io.on('connection', (socket) => {
       return;
     }
     const now = Date.now();
-    if (now - room.lastImageAt < RATE_LIMIT_MS) {
+    if (now - room.lastImageAt < RATE_LIMIT_MS || room.processing) {
       if (ack) ack({ error: 'RATE_LIMITED' });
       return;
     }
     room.lastImageAt = now;
+    room.processing = true;
     if (ack) ack({ ok: true });
 
     io.to(roomId).emit('ai_processing_start');
@@ -204,9 +210,9 @@ io.on('connection', (socket) => {
       } else if (err?.message?.includes('API_KEY') || err?.message?.includes('403')) {
         userMsg = 'APIキーが無効です。Render の環境変数を確認してください。';
       }
-      io.to(roomId).emit('ai_error', {
-        message: userMsg,
-      });
+      io.to(roomId).emit('ai_error', { message: userMsg });
+    } finally {
+      if (rooms.has(roomId)) rooms.get(roomId).processing = false;
     }
   });
 
