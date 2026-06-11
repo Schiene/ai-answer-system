@@ -114,9 +114,12 @@
 
       socket = io({ transports: ['websocket'] });
 
+      let joined = false;
+
       socket.on('connect', () => socket.emit('join_room', { roomId }));
 
       socket.on('join_ack', ({ roomId: id }) => {
+        joined = true;
         $('room-label').textContent = `Room: ${id}`;
         joinView.classList.add('hidden');
         cameraView.classList.remove('hidden');
@@ -125,6 +128,14 @@
       });
 
       socket.on('error_occurred', ({ message }) => {
+        if (joined) {
+          // 再接続後のルーム参加失敗 → ディスプレイ側の再作成を待ってリトライ
+          setCamStatus('dot-yellow', '再接続中…');
+          setTimeout(() => {
+            if (socket) socket.emit('join_room', { roomId });
+          }, 3000);
+          return;
+        }
         $('join-btn').disabled = false;
         $('join-btn').textContent = '参加する';
         showJoinError(message);
@@ -132,7 +143,7 @@
         socket = null;
       });
 
-      socket.on('disconnect', () => setCamStatus('dot-red', '切断されました'));
+      socket.on('disconnect', () => setCamStatus('dot-red', '切断 — 自動再接続中…'));
     }
 
     function showJoinError(msg) {

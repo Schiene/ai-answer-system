@@ -100,24 +100,25 @@
 
     // ── Socket.io ─────────────────────────────────────────────────────────────
     const socket = io({ transports: ['websocket'] });
-    let activeRoomId = null;
+    // sessionStorage: タブを閉じると消える（同タブ内の再接続には残る）
+    let activeRoomId = sessionStorage.getItem('ai_room_id') || null;
 
     socket.on('connect', () => {
       if (activeRoomId) {
-        // 再接続時はQRコード画面に戻らず、サーバー側で新ルームを作り直す
-        setStatus('dot-gray', '再接続中…ルーム再作成');
-        activeRoomId = null;
+        setStatus('dot-gray', '再接続中…');
+        socket.emit('rejoin_room', { roomId: activeRoomId });
       } else {
         setStatus('dot-gray', 'ルーム作成中…');
+        socket.emit('create_room');
       }
-      socket.emit('create_room');
     });
     socket.on('disconnect', () => {
-      setStatus('dot-red', '切断されました — 自動再接続中…');
+      setStatus('dot-red', '切断 — 自動再接続中…');
     });
 
     socket.on('room_created', ({ roomId, expiresAt }) => {
       activeRoomId = roomId;
+      sessionStorage.setItem('ai_room_id', roomId);
       $('room-id-display').textContent = roomId;
       $('room-badge').textContent = roomId;
       const exp = new Date(expiresAt);
@@ -189,6 +190,8 @@
 
     socket.on('error_occurred', ({ message }) => showToast(message));
     socket.on('room_expired', () => {
+      sessionStorage.removeItem('ai_room_id');
+      activeRoomId = null;
       showToast('ルームの有効期限が切れました。ページを再読み込みしてください。');
       setStatus('dot-red', '期限切れ');
     });

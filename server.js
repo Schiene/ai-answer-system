@@ -128,27 +128,51 @@ const expiryInterval = setInterval(() => {
 
 // ── Socket.io イベント ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  // Display → Backend: ルーム作成
+  // ルーム作成・復帰の共通処理
+  function setupDisplayRoom(socket, roomId, room) {
+    rooms.set(roomId, room);
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+    socket.data.role   = 'display';
+    socket.emit('room_created', { roomId, expiresAt: room.createdAt + ROOM_EXPIRY_MS });
+  }
+
+  // Display → Backend: ルーム作成（初回）
   socket.on('create_room', () => {
     let roomId;
     let tries = 0;
     do { roomId = generateRoomId(); tries++; }
     while (rooms.has(roomId) && tries < 20);
 
-    const room = {
+    setupDisplayRoom(socket, roomId, {
       displaySocketId: socket.id,
       cameraSocketId: null,
       createdAt: Date.now(),
       lastImageAt: 0,
       processing: false,
-    };
-    rooms.set(roomId, room);
-    socket.join(roomId);
-    socket.data.roomId = roomId;
-    socket.data.role   = 'display';
-
-    socket.emit('room_created', { roomId, expiresAt: room.createdAt + ROOM_EXPIRY_MS });
+    });
     console.log(`[room] created: ${roomId}`);
+  });
+
+  // Display → Backend: ルーム再参加（再接続時）
+  socket.on('rejoin_room', ({ roomId }) => {
+    let room = rooms.get(roomId);
+    if (room) {
+      // ルームが生きていれば display ソケットだけ更新
+      room.displaySocketId = socket.id;
+      room.processing = false;
+    } else {
+      // サーバー再起動でルームが消えた → 同じIDで再作成
+      room = {
+        displaySocketId: socket.id,
+        cameraSocketId: null,
+        createdAt: Date.now(),
+        lastImageAt: 0,
+        processing: false,
+      };
+    }
+    setupDisplayRoom(socket, roomId, room);
+    console.log(`[room] display rejoined: ${roomId}`);
   });
 
   // Camera → Backend: ルーム参加
