@@ -86,12 +86,13 @@
     const actionLabel     = $('action-label');
 
     // ── 状態 ──────────────────────────────────────────────────────────────────
-    let socket       = null;
-    let roomId       = null;
-    let captureTimer = null;
-    let tickTimer    = null;
-    let nextSendAt   = 0;
-    let processing   = false;
+    let socket            = null;
+    let roomId            = null;
+    let captureTimer      = null;
+    let tickTimer         = null;
+    let nextSendAt        = 0;
+    let processing        = false;
+    let resultWaitTimeout = null;  // AI結果待ちタイムアウト
 
     // URLパラメータで自動参加
     const urlRoom = new URLSearchParams(location.search).get('room');
@@ -144,6 +145,16 @@
       });
 
       socket.on('disconnect', () => setCamStatus('dot-red', '切断 — 自動再接続中…'));
+
+      // AI結果をカメラ側でも受け取り、次のキャプチャタイミングを制御する
+      socket.on('ai_result_ready', () => {
+        clearTimeout(resultWaitTimeout);
+        if (processing) scheduleNext();           // 通常の20秒間隔
+      });
+      socket.on('ai_error', ({ unreadable }) => {
+        clearTimeout(resultWaitTimeout);
+        if (processing) scheduleNext(unreadable ? 5_000 : 10_000); // 読み取り不可5秒、その他エラー10秒
+      });
     }
 
     function showJoinError(msg) {
@@ -175,8 +186,8 @@
       scheduleNext();
     }
 
-    function scheduleNext() {
-      nextSendAt = Date.now() + CAPTURE_INTERVAL_MS;
+    function scheduleNext(delay = CAPTURE_INTERVAL_MS) {
+      nextSendAt = Date.now() + delay;
       processing = false;
       actionLabel.textContent = '次の解析まで';
       setCamStatus('dot-green', '撮影中');
@@ -187,7 +198,7 @@
         const remaining = Math.max(0, nextSendAt - Date.now());
         const secs = Math.ceil(remaining / 1000);
         countdownLabel.textContent = secs;
-        const progress = 1 - remaining / CAPTURE_INTERVAL_MS;
+        const progress = 1 - remaining / delay;
         progressRing.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - progress));
         if (remaining <= 0) {
           clearInterval(tickTimer);
@@ -227,8 +238,15 @@
       $('last-time-label').textContent = `${new Date().getHours()}:${String(new Date().getMinutes()).padStart(2,'0')} 送信`;
 
       socket.emit('image_captured', { roomId, imageData }, (ack) => {
-        // ACK受信後、次のサイクルへ（エラーでも継続）
-        scheduleNext();
+        if (ack?.error) {
+          scheduleNext();
+          return;
+        }
+        // サーバーがAI処理を開始したので、結果イベントを待つ（最大45秒）
+        clearTimeout(resultWaitTimeout);
+        resultWaitTimeout = setTimeout(() => {
+          if (processing) scheduleNext();
+        }, 45_000);
       });
     }
 

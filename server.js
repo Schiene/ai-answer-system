@@ -78,7 +78,10 @@ function parseRetryDelay(err) {
 async function analyzeImage(base64Jpeg) {
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const call = () => model.generateContent([
-    '画像に写っている問題を解き、答えだけを簡潔に出力してください。解説や問題文は不要です。',
+    `画像に写っている問題を解いてください。
+選択肢（①②③④、ア・イ・ウ・エ、A・B・C・D、1・2・3・4など）がある場合は、上から数えて正解が何番目かを数字（1、2、3、4）のみで答えてください。
+選択肢がない問題は答えだけを簡潔に出力してください。解説・問題文は不要です。
+問題が読み取れない・写っていない場合は「読み取り不可」とだけ出力してください。`,
     { inlineData: { data: base64Jpeg, mimeType: 'image/jpeg' } },
   ]);
 
@@ -98,6 +101,12 @@ async function analyzeImage(base64Jpeg) {
   }
   const answer = res.response.text().trim();
   if (!answer) throw new Error('AIから回答が得られませんでした');
+  // 読み取り不可はエラーとして扱い、カメラ側に短いクールタイムを適用させる
+  if (answer === '読み取り不可') {
+    const err = new Error('読み取り不可');
+    err.unreadable = true;
+    throw err;
+  }
   return { answer };
 }
 
@@ -234,7 +243,8 @@ io.on('connection', (socket) => {
       } else if (err?.message?.includes('API_KEY') || err?.message?.includes('403')) {
         userMsg = 'APIキーが無効です。Render の環境変数を確認してください。';
       }
-      io.to(roomId).emit('ai_error', { message: userMsg });
+      // unreadable フラグをカメラに伝えて短いクールタイムを促す
+      io.to(roomId).emit('ai_error', { message: userMsg, unreadable: !!err.unreadable });
     } finally {
       if (rooms.has(roomId)) rooms.get(roomId).processing = false;
     }
