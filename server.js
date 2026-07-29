@@ -29,17 +29,31 @@ const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const SSL_CERT       = process.env.SSL_CERT_PATH;
 const SSL_KEY        = process.env.SSL_KEY_PATH;
 
+// ── 配信ベースパス（サブディレクトリ対応） ──────────────────────────────────
+// 本番はリバースプロキシ配下の /aas/ で配信するため、受け付けるパスをずらせるようにする。
+//   ローカル開発          -> BASE_PATH 未設定（従来どおり / 直下）
+//   本番（rurucoa.com）   -> BASE_PATH=/aas
+// nginx 側は proxy_pass の末尾にスラッシュを付けず、/aas/... をそのまま渡すこと。
+// スラッシュ付き（http://127.0.0.1:3001/）にするとプレフィックスが削られ、
+// ここの設定と食い違って Socket.io の接続が確立できなくなる。
+const BASE_PATH = (() => {
+  let b = (process.env.BASE_PATH || '').trim().replace(/\/+$/, '');  // 末尾スラッシュを落とす
+  if (b && !b.startsWith('/')) b = '/' + b;
+  return b;   // 未設定なら空文字 = 従来どおりの挙動
+})();
+console.log(`[server] base path: ${BASE_PATH || '/'}`);
+
 // ── Express ──────────────────────────────────────────────────────────────────
 const app = express();
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(BASE_PATH || '/', express.static(path.join(__dirname, 'public')));
 
 // ヘルスチェック（Render / ロードバランサー向け）
-app.get('/health', (_req, res) => {
+app.get(`${BASE_PATH}/health`, (_req, res) => {
   res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), model: GEMINI_MODEL });
 });
 
 // Gemini API 疎通確認（デバッグ用）
-app.get('/test-ai', async (_req, res) => {
+app.get(`${BASE_PATH}/test-ai`, async (_req, res) => {
   try {
     const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
     const result = await model.generateContent('日本語で「テスト成功」とだけ答えてください。');
@@ -64,7 +78,9 @@ if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
 }
 
 // ── Socket.io ────────────────────────────────────────────────────────────────
-const io = new Server(server);
+// 接続用のパスもベースパスに合わせる（既定は '/socket.io'）。
+// ブラウザ側は表示中ページからの相対パスで同じ値を組み立てるので、両者は自動で一致する。
+const io = new Server(server, { path: `${BASE_PATH}/socket.io` });
 
 // ── Gemini API ───────────────────────────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);

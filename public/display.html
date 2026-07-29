@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI解答システム</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="/socket.io/socket.io.js"></script>
+  <!-- 先頭に / を付けないこと。相対パスにしておくと、/ 直下でも /aas/ 配下でも動く -->
+  <script src="socket.io/socket.io.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <style>
     #answer-text { transition: font-size .2s ease; }
@@ -99,7 +100,7 @@
     let history = []; // 最新5件の答え
 
     // ── Socket.io ─────────────────────────────────────────────────────────────
-    const socket = io({ transports: ['websocket'] });
+    const socket = io({ transports: ['websocket'], path: new URL('socket.io', location.href).pathname });
     // sessionStorage: タブを閉じると消える（同タブ内の再接続には残る）
     let activeRoomId = sessionStorage.getItem('ai_room_id') || null;
 
@@ -128,7 +129,8 @@
       showView('waiting');
       setStatus('dot-yellow', 'カメラ接続待ち');
 
-      const cameraUrl = `${location.origin}/camera.html?room=${roomId}`;
+      // location.origin だと /aas/ が抜けてしまうため、現在のページからの相対で組む
+      const cameraUrl = new URL(`camera.html?room=${roomId}`, location.href).href;
       try {
         if (typeof QRCode !== 'undefined') {
           $('qr-canvas').innerHTML = '';

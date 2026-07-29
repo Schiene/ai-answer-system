@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>AI解答システム - カメラ</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="/socket.io/socket.io.js"></script>
+  <!-- 先頭に / を付けないこと。相対パスにしておくと、/ 直下でも /aas/ 配下でも動く -->
+  <script src="socket.io/socket.io.js"></script>
 </head>
 <body class="bg-gray-950 text-gray-100 h-screen flex flex-col overflow-hidden select-none">
 
@@ -113,7 +114,7 @@
       $('join-btn').disabled = true;
       $('join-btn').textContent = '接続中…';
 
-      socket = io({ transports: ['websocket'] });
+      socket = io({ transports: ['websocket'], path: new URL('socket.io', location.href).pathname });
 
       let joined = false;
 
