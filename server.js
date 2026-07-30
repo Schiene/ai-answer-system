@@ -51,7 +51,8 @@ console.log(`[server] base path: ${BASE_PATH || '/'}`);
 const app = express();
 app.use(BASE_PATH || '/', express.static(path.join(__dirname, 'public')));
 
-// ヘルスチェック（Render / ロードバランサー向け）
+// ヘルスチェック（監視・疎通確認用）
+//   curl -u saku:<パスワード> https://rurucoa.com/aas/health
 app.get(`${BASE_PATH}/health`, (_req, res) => {
   res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), model: GEMINI_MODEL });
 });
@@ -261,7 +262,7 @@ io.on('connection', (socket) => {
       if (err?.message?.includes('429')) {
         userMsg = 'APIの使用量制限に達しました。しばらく待ってから再試行してください。';
       } else if (err?.message?.includes('API_KEY') || err?.message?.includes('403')) {
-        userMsg = 'APIキーが無効です。Render の環境変数を確認してください。';
+        userMsg = 'APIキーが無効です。/etc/ai-answer-system/aas.env を確認してください。';
       }
       // unreadable フラグをカメラに伝えて短いクールタイムを促す
       io.to(roomId).emit('ai_error', { message: userMsg, unreadable: !!err.unreadable });
