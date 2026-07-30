@@ -25,7 +25,11 @@ const PORT           = parseInt(process.env.PORT              || '3001');
 const ROOM_ID_LENGTH = parseInt(process.env.ROOM_ID_LENGTH    || '10');
 const ROOM_EXPIRY_MS = parseInt(process.env.ROOM_EXPIRY_MINUTES || '60') * 60 * 1000;
 const RATE_LIMIT_MS  = parseInt(process.env.RATE_LIMIT_SECONDS  || '10') * 1000;
-const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// 既定は画像入力に対応した現行の flash 系。
+// gemini-2.5-flash は 2026-07 時点で新規APIキーに対して 404（no longer available to
+// new users）を返すため既定から外した。利用可能なモデルは以下で確認できる:
+//   curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"
+const GEMINI_MODEL   = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 const SSL_CERT       = process.env.SSL_CERT_PATH;
 const SSL_KEY        = process.env.SSL_KEY_PATH;
 

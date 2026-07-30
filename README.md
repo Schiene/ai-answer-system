@@ -88,7 +88,7 @@ npm start
 | 変数名 | デフォルト | 説明 |
 |--------|-----------|------|
 | `GEMINI_API_KEY` | — | Gemini API キー（必須） |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | 使用するモデル |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | 使用するモデル。**画像入力に対応したものを選ぶこと** |
 | `PORT` | `3001` | サーバーポート |
 | `BASE_PATH` | （空） | 配信サブディレクトリ。本番は `/aas`。未設定ならルート直下 |
 | `ROOM_ID_LENGTH` | `10` | Room ID の桁数 |
