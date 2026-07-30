@@ -23,8 +23,27 @@ if (!process.env.GEMINI_API_KEY) {
 // ── 設定 ────────────────────────────────────────────────────────────────────
 const PORT           = parseInt(process.env.PORT              || '3001');
 const ROOM_ID_LENGTH = parseInt(process.env.ROOM_ID_LENGTH    || '10');
-const ROOM_EXPIRY_MS = parseInt(process.env.ROOM_EXPIRY_MINUTES || '60') * 60 * 1000;
 const RATE_LIMIT_MS  = parseInt(process.env.RATE_LIMIT_SECONDS  || '10') * 1000;
+
+// ルームの有効期限。**0 = 無期限（既定）**。
+// 設計方針: 「自分でカメラや画面を閉じるまでは動き続ける」ことを優先する。
+// 以前は60分で勝手に切れていたが、使っている最中に落ちるほうが実害が大きい。
+// 片付けは「閲覧側が閉じたら削除」で行う（下の DISPLAY_GRACE_MS 参照）。
+const ROOM_EXPIRY_MS = parseInt(process.env.ROOM_EXPIRY_MINUTES || '0') * 60 * 1000;
+
+// 閲覧側が切断してからルームを削除するまでの猶予時間。
+// 電波の一瞬の途切れ・画面スリープ・タブの復帰で部屋が消えないようにするため。
+// この猶予内に再接続すれば、同じルームがそのまま続く。
+const DISPLAY_GRACE_MS = parseInt(process.env.DISPLAY_GRACE_SECONDS || '180') * 1000;
+
+// Gemini の応答を待つ上限。
+// ★ これが無いと、応答が返ってこないとき room.processing が true のまま残り、
+//   以降の撮影がすべて「処理中」として拒否され続ける（＝ルームが実質死ぬ）。
+const AI_TIMEOUT_MS = parseInt(process.env.AI_TIMEOUT_SECONDS || '30') * 1000;
+
+// 一時的な失敗（レート制限・Google側の一時エラー・通信断）の再試行回数。
+// 撮影は問題が切り替わるたびに自動で行われるので、粘りすぎず1回で諦めて次に任せる。
+const AI_MAX_RETRIES = parseInt(process.env.AI_MAX_RETRIES || '1');
 // 既定は画像入力に対応した現行の flash 系。
 // gemini-2.5-flash は 2026-07 時点で新規APIキーに対して 404（no longer available to
 // new users）を返すため既定から外した。利用可能なモデルは以下で確認できる:
@@ -90,36 +109,62 @@ const io = new Server(server, { path: `${BASE_PATH}/socket.io` });
 // ── Gemini API ───────────────────────────────────────────────────────────────
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// 429 エラーからリトライ待機時間(ms)を取り出す
+// 429 エラーからリトライ待機時間(ms)を取り出す。長すぎる指示は15秒で打ち切る
+// （利用者を待たせるより、次の撮影に任せたほうが体験が良い）
 function parseRetryDelay(err) {
   const match = err?.message?.match(/retry[^"]*"?(\d+)s/i);
-  return match ? parseInt(match[1]) * 1000 : 15_000;
+  const ms = match ? parseInt(match[1]) * 1000 : 15_000;
+  return Math.min(ms, 15_000);
+}
+
+// 「時間をおけば直る」失敗かどうか。これ以外は即座に諦めて利用者に伝える
+function isRetryable(err) {
+  if (err?.unreadable) return false;                      // AIは応答済み。撮り直しが必要
+  const m = String(err?.message || '');
+  if (m.includes('429')) return true;                     // レート制限
+  if (/\b(500|502|503|504)\b/.test(m)) return true;       // Google側の一時エラー
+  if (/timeout|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|fetch failed|socket hang up/i.test(m)) return true;
+  return false;                                           // APIキー不正・モデル不在などは再試行しても無駄
+}
+
+// 指定時間で必ず決着させる。Gemini の応答が返らないまま固まるのを防ぐ
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 async function analyzeImage(base64Jpeg) {
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-  const call = () => model.generateContent([
+  const call = () => withTimeout(model.generateContent([
     `画像に写っている問題を解いてください。
 選択肢（①②③④、ア・イ・ウ・エ、A・B・C・D、1・2・3・4など）がある場合は、上から数えて正解が何番目かを数字（1、2、3、4）のみで答えてください。
 選択肢がない問題は答えだけを簡潔に出力してください。解説・問題文は不要です。
 問題が読み取れない・写っていない場合は「読み取り不可」とだけ出力してください。`,
     { inlineData: { data: base64Jpeg, mimeType: 'image/jpeg' } },
-  ]);
+  ]), AI_TIMEOUT_MS, 'gemini');
 
-  let res;
-  try {
-    res = await call();
-  } catch (err) {
-    // レート制限の場合は一度だけ自動リトライ
-    if (err?.message?.includes('429')) {
-      const delay = parseRetryDelay(err);
-      console.warn(`[ai] rate limited, retrying in ${delay}ms`);
-      await new Promise(r => setTimeout(r, delay));
+  let res = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt <= AI_MAX_RETRIES; attempt++) {
+    try {
       res = await call();
-    } else {
-      throw err;
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt === AI_MAX_RETRIES) break;
+      const delay = String(err?.message || '').includes('429')
+        ? parseRetryDelay(err)
+        : 2000 * (attempt + 1);
+      console.warn(`[ai] retry ${attempt + 1}/${AI_MAX_RETRIES} in ${delay}ms: ${String(err.message).slice(0, 90)}`);
+      await new Promise(r => setTimeout(r, delay));
     }
   }
+  if (lastErr) throw lastErr;
+
   const answer = res.response.text().trim();
   if (!answer) throw new Error('AIから回答が得られませんでした');
   // 読み取り不可はエラーとして扱い、カメラ側に短いクールタイムを適用させる
@@ -143,28 +188,56 @@ function generateRoomId() {
   return id;
 }
 
-// 期限切れルームを定期削除
-const expiryInterval = setInterval(() => {
-  const now = Date.now();
-  for (const [roomId, room] of rooms) {
-    if (now - room.createdAt >= ROOM_EXPIRY_MS) {
-      io.to(roomId).emit('room_expired', { roomId });
-      io.in(roomId).socketsLeave(roomId);
-      rooms.delete(roomId);
-      console.log(`[room] expired: ${roomId}`);
-    }
-  }
-}, 60_000);
+// ルームが期限切れかどうか（ROOM_EXPIRY_MS = 0 のときは永久に期限切れにならない）
+function isExpired(room) {
+  return ROOM_EXPIRY_MS > 0 && Date.now() - room.createdAt >= ROOM_EXPIRY_MS;
+}
+
+// 閲覧側が閉じた（と思われる）ルームを削除する。猶予中に戻ってくれば取り消される
+function scheduleRoomCleanup(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  clearTimeout(room.displayGraceTimer);
+  room.displayGraceTimer = setTimeout(() => {
+    const r = rooms.get(roomId);
+    if (!r) return;
+    io.in(roomId).socketsLeave(roomId);
+    rooms.delete(roomId);
+    console.log(`[room] cleaned up after grace period: ${roomId}`);
+  }, DISPLAY_GRACE_MS);
+}
+
+// 期限切れルームの定期削除。無期限設定（既定）ならタイマー自体を動かさない
+const expiryInterval = ROOM_EXPIRY_MS > 0
+  ? setInterval(() => {
+      for (const [roomId, room] of rooms) {
+        if (isExpired(room)) {
+          io.to(roomId).emit('room_expired', { roomId });
+          io.in(roomId).socketsLeave(roomId);
+          rooms.delete(roomId);
+          console.log(`[room] expired: ${roomId}`);
+        }
+      }
+    }, 60_000)
+  : null;
 
 // ── Socket.io イベント ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   // ルーム作成・復帰の共通処理
   function setupDisplayRoom(socket, roomId, room) {
+    // 閲覧側が戻ってきたので、片付け予約が入っていたら取り消す
+    clearTimeout(room.displayGraceTimer);
+    room.displayGraceTimer = null;
+
     rooms.set(roomId, room);
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.role   = 'display';
-    socket.emit('room_created', { roomId, expiresAt: room.createdAt + ROOM_EXPIRY_MS });
+    // 無期限のときは expiresAt を null で返す（画面側は「無期限」と表示する）
+    socket.emit('room_created', {
+      roomId,
+      expiresAt: ROOM_EXPIRY_MS > 0 ? room.createdAt + ROOM_EXPIRY_MS : null,
+    });
   }
 
   // Display → Backend: ルーム作成（初回）
@@ -180,6 +253,7 @@ io.on('connection', (socket) => {
       createdAt: Date.now(),
       lastImageAt: 0,
       processing: false,
+      displayGraceTimer: null,
     });
     console.log(`[room] created: ${roomId}`);
   });
@@ -199,6 +273,7 @@ io.on('connection', (socket) => {
         createdAt: Date.now(),
         lastImageAt: 0,
         processing: false,
+        displayGraceTimer: null,
       };
     }
     setupDisplayRoom(socket, roomId, room);
@@ -215,7 +290,7 @@ io.on('connection', (socket) => {
       });
       return;
     }
-    if (Date.now() - room.createdAt >= ROOM_EXPIRY_MS) {
+    if (isExpired(room)) {
       rooms.delete(roomId);
       socket.emit('error_occurred', {
         code: 'ROOM_EXPIRED',
@@ -229,7 +304,10 @@ io.on('connection', (socket) => {
     socket.data.role   = 'camera';
 
     socket.to(roomId).emit('camera_connected');
-    socket.emit('join_ack', { roomId, expiresAt: room.createdAt + ROOM_EXPIRY_MS });
+    socket.emit('join_ack', {
+      roomId,
+      expiresAt: ROOM_EXPIRY_MS > 0 ? room.createdAt + ROOM_EXPIRY_MS : null,
+    });
     console.log(`[room] camera joined: ${roomId}`);
   });
 
@@ -283,9 +361,11 @@ io.on('connection', (socket) => {
       socket.to(roomId).emit('camera_disconnected');
       console.log(`[room] camera disconnected: ${roomId}`);
     } else if (role === 'display') {
-      io.in(roomId).socketsLeave(roomId);
-      rooms.delete(roomId);
-      console.log(`[room] display closed, room deleted: ${roomId}`);
+      // 即削除しない。電波の一瞬の途切れや画面スリープで部屋が消えると
+      // 「勝手に終わる」体験になるため、猶予を置いてから片付ける。
+      // 猶予内に再接続すれば rejoin_room で予約が取り消され、そのまま続く。
+      scheduleRoomCleanup(roomId);
+      console.log(`[room] display disconnected, cleanup in ${DISPLAY_GRACE_MS}ms: ${roomId}`);
     }
   });
 });
@@ -295,12 +375,14 @@ server.listen(PORT, () => {
   const proto = (SSL_CERT && SSL_KEY) ? 'https' : 'http';
   console.log(`[server] listening on ${proto}://localhost:${PORT}`);
   console.log(`[server] model: ${GEMINI_MODEL}`);
+  console.log(`[server] room expiry: ${ROOM_EXPIRY_MS > 0 ? ROOM_EXPIRY_MS / 60000 + 'min' : '無期限'}`);
+  console.log(`[server] display grace: ${DISPLAY_GRACE_MS / 1000}s / ai timeout: ${AI_TIMEOUT_MS / 1000}s / retries: ${AI_MAX_RETRIES}`);
 });
 
 // ── グレースフルシャットダウン ────────────────────────────────────────────────
 function shutdown(signal) {
   console.log(`[server] ${signal} received, shutting down…`);
-  clearInterval(expiryInterval);
+  if (expiryInterval) clearInterval(expiryInterval);
   server.close(() => {
     console.log('[server] HTTP server closed.');
     process.exit(0);

@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>AI解答システム - カメラ</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- 外部CDNに依存しないよう同梱。CDN障害時でも画面が崩れない -->
+  <script src="vendor/tailwind.js"></script>
   <!-- 先頭に / を付けないこと。相対パスにしておくと、/ 直下でも /aas/ 配下でも動く -->
   <script src="socket.io/socket.io.js"></script>
 </head>
@@ -72,10 +73,36 @@
 
   <script>
     // ── 設定 ──────────────────────────────────────────────────────────────────
-    const CAPTURE_INTERVAL_MS = 20_000;  // 20秒ごとに送信
-    const SEND_MAX_SIDE       = 1280;    // 送信画像の最大辺
-    const SEND_QUALITY        = 0.75;    // JPEG圧縮品質
-    const RING_CIRCUMFERENCE  = 107;     // r=17 の円周 ≈ 2πr
+    //
+    // 撮影の考え方（2026-07-30 変更。以前は20秒ごとの固定間隔だった）
+    //   「同じ問題を写している間は何もせず、別の問題に切り替わったときだけ解く」
+    //
+    //   1. 小さな白黒画像を DETECT_INTERVAL_MS ごとに取り込む（軽い処理）
+    //   2. 「最後に送った画像」と比べて CHANGE_THRESHOLD 以上違う → 問題が変わった
+    //   3. 直前のコマとの差が STILL_THRESHOLD 以下 が STILL_FRAMES_REQUIRED 回続く
+    //      → 紙が静止した。ここで初めて高画質で撮って送る（手ブレ画像を送らない）
+    //   4. 送った画像を新しい基準にする → 同じ問題では二度と反応しない
+    //
+    const SEND_MAX_SIDE   = 1280;   // 送信画像の最大辺
+    const SEND_QUALITY    = 0.75;   // JPEG圧縮品質
+
+    const DETECT_INTERVAL_MS = 400; // 変化を見にいく間隔
+    const DETECT_W = 160;           // 判定用の縮小サイズ（小さいほど軽く、ノイズに鈍い）
+    const DETECT_H = 120;
+
+    // 0〜255 の平均差で判定する。数字を上げると鈍感に、下げると敏感になる。
+    const CHANGE_THRESHOLD = 12;    // これ以上違えば「別の問題」
+    const STILL_THRESHOLD  = 4;     // これ以下なら「静止している」
+    const STILL_FRAMES_REQUIRED = 3;// 静止が何コマ続いたら送るか（3コマ ≒ 1.2秒）
+
+    // 送信後の待機。サーバー側のレート制限(RATE_LIMIT_SECONDS)と揃えておく
+    const COOLDOWN_MS = 10_000;
+    // 「読み取り不可」が続いたときに、無駄な送信を繰り返さないための上限
+    const MAX_UNREADABLE_STREAK = 3;
+    // サーバーから結果が返らなかったときの保険（サーバー側は30秒で打ち切る）
+    const RESULT_WAIT_MS = 60_000;
+
+    const RING_CIRCUMFERENCE = 107; // r=17 の円周 ≈ 2πr
 
     // ── DOM ───────────────────────────────────────────────────────────────────
     const $ = id => document.getElementById(id);
@@ -89,11 +116,30 @@
     // ── 状態 ──────────────────────────────────────────────────────────────────
     let socket            = null;
     let roomId            = null;
-    let captureTimer      = null;
-    let tickTimer         = null;
-    let nextSendAt        = 0;
-    let processing        = false;
-    let resultWaitTimeout = null;  // AI結果待ちタイムアウト
+    let detectTimer       = null;  // 変化検知ループ
+    let tickTimer         = null;  // クールダウンの表示更新
+    let resultWaitTimeout = null;  // AI結果待ちの保険
+
+    // 撮影の状態機械
+    //   FIRST    : まだ一度も送っていない。静止したら1枚送る
+    //   IDLE     : 送信済み。基準と違う画になるまで何もしない
+    //   SETTLING : 変化を検知した。静止するのを待っている
+    //   SENDING  : 送信してAIの結果を待っている
+    //   COOLDOWN : 送信直後の待機中
+    let state = 'FIRST';
+
+    let refFrame  = null;   // 最後に送った画（この画と比べて「変わったか」を判断する）
+    let prevFrame = null;   // 直前のコマ（この画と比べて「静止したか」を判断する）
+    let stillCount = 0;
+    let unreadableStreak = 0;
+    let cooldownUntil = 0;
+    let lastSentFrame = null;   // 送信中の画。結果が返ってきたら refFrame にする
+
+    // 判定用の縮小キャンバス（使い回してメモリを無駄にしない）
+    const detectCanvas = document.createElement('canvas');
+    detectCanvas.width  = DETECT_W;
+    detectCanvas.height = DETECT_H;
+    const detectCtx = detectCanvas.getContext('2d', { willReadFrequently: true });
 
     // URLパラメータで自動参加
     const urlRoom = new URLSearchParams(location.search).get('room');
@@ -147,14 +193,31 @@
 
       socket.on('disconnect', () => setCamStatus('dot-red', '切断 — 自動再接続中…'));
 
-      // AI結果をカメラ側でも受け取り、次のキャプチャタイミングを制御する
+      // AI結果を受け取り、次の検知を再開するタイミングを決める
       socket.on('ai_result_ready', () => {
         clearTimeout(resultWaitTimeout);
-        if (processing) scheduleNext();           // 通常の20秒間隔
+        unreadableStreak = 0;
+        // 送った画を新しい基準にする → この問題を写している間はもう反応しない
+        if (lastSentFrame) refFrame = lastSentFrame;
+        enterCooldown(COOLDOWN_MS);
       });
+
       socket.on('ai_error', ({ unreadable }) => {
         clearTimeout(resultWaitTimeout);
-        if (processing) scheduleNext(unreadable ? 5_000 : 10_000); // 読み取り不可5秒、その他エラー10秒
+        if (unreadable) {
+          unreadableStreak++;
+          // 基準をあえて更新しない = 同じ問題でも再挑戦する。
+          // ピントが合った瞬間や影が外れた瞬間に拾えるようにするため。
+          if (unreadableStreak >= MAX_UNREADABLE_STREAK) {
+            // 何も写っていない場所に向け続けている可能性が高い。
+            // 基準を今の画にして、はっきり変化があるまで待つ（無駄な送信を止める）。
+            if (lastSentFrame) refFrame = lastSentFrame;
+            unreadableStreak = 0;
+            setCamStatus('dot-yellow', '読み取れません — 問題を写し直してください');
+          }
+        }
+        // 通信エラー等は基準を更新しない → 待機後にそのまま再挑戦される
+        enterCooldown(COOLDOWN_MS);
       });
     }
 
@@ -182,73 +245,149 @@
       }
     }
 
-    // ── 10秒キャプチャループ ──────────────────────────────────────────────────
+    // ── 変化検知ループ ────────────────────────────────────────────────────────
     function startCaptureLoop() {
-      scheduleNext();
+      state = 'FIRST';
+      refFrame = null;
+      prevFrame = null;
+      stillCount = 0;
+      unreadableStreak = 0;
+      clearInterval(detectTimer);
+      detectTimer = setInterval(detectTick, DETECT_INTERVAL_MS);
+      setPanel('—', '問題をかざしてください');
+      ringProgress(0);
     }
 
-    function scheduleNext(delay = CAPTURE_INTERVAL_MS) {
-      nextSendAt = Date.now() + delay;
-      processing = false;
-      actionLabel.textContent = '次の解析まで';
-      setCamStatus('dot-green', '撮影中');
+    // 今の映像を「小さな白黒の数値配列」にする。比較を軽くするための下準備
+    function grabFrame() {
+      detectCtx.drawImage(video, 0, 0, DETECT_W, DETECT_H);
+      const { data } = detectCtx.getImageData(0, 0, DETECT_W, DETECT_H);
+      const gray = new Uint8Array(DETECT_W * DETECT_H);
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        // 人の目の感度に合わせた重み付けで明るさに変換
+        gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+      }
+      return gray;
+    }
 
-      // カウントダウン表示
-      clearInterval(tickTimer);
-      tickTimer = setInterval(() => {
-        const remaining = Math.max(0, nextSendAt - Date.now());
-        const secs = Math.ceil(remaining / 1000);
-        countdownLabel.textContent = secs;
-        const progress = 1 - remaining / delay;
-        progressRing.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - progress));
-        if (remaining <= 0) {
-          clearInterval(tickTimer);
-          captureAndSend();
+    // 2枚の画の違いを 0〜255 の平均で返す。片方が無ければ「全く違う」扱い
+    function meanAbsDiff(a, b) {
+      if (!a || !b) return 255;
+      let sum = 0;
+      for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+      return sum / a.length;
+    }
+
+    function detectTick() {
+      if (video.readyState < 2 || !socket || !roomId) return;
+      if (state === 'SENDING') return;              // 結果待ち中は何もしない
+
+      if (state === 'COOLDOWN') {
+        if (Date.now() < cooldownUntil) return;     // 残り時間の表示は enterCooldown 側が担当
+        state = refFrame ? 'IDLE' : 'FIRST';
+        setCamStatus('dot-green', '待機中');
+      }
+
+      const frame = grabFrame();
+      const diffPrev = meanAbsDiff(frame, prevFrame);   // 直前のコマとの差 = 動いているか
+      prevFrame = frame;
+
+      // 送信済み: 基準と比べて「別の問題になったか」だけを見る
+      if (state === 'IDLE') {
+        if (meanAbsDiff(frame, refFrame) > CHANGE_THRESHOLD) {
+          state = 'SETTLING';
+          stillCount = 0;
+          setCamStatus('dot-indigo', '変化を検知');
+          setPanel('…', '静止を待っています');
+        } else {
+          setPanel('◎', '同じ問題 — 変えると自動で解きます');
         }
-      }, 100);
-    }
-
-    function captureAndSend() {
-      if (video.readyState < 2 || !socket || !roomId) {
-        scheduleNext();
         return;
       }
 
-      processing = true;
-      setCamStatus('dot-indigo', 'AI 解析中…');
-      actionLabel.textContent = '解析中…';
-      countdownLabel.textContent = '…';
+      // 初回、または変化を検知した直後: 静止するまで待ってから送る
+      if (state === 'FIRST' || state === 'SETTLING') {
+        if (diffPrev <= STILL_THRESHOLD) {
+          stillCount++;
+          setPanel(String(Math.max(1, STILL_FRAMES_REQUIRED - stillCount + 1)), '静止を確認中');
+          if (stillCount >= STILL_FRAMES_REQUIRED) sendFrame(frame);
+        } else {
+          stillCount = 0;
+          setPanel('…', state === 'FIRST' ? '問題をかざしてください' : '静止を待っています');
+        }
+      }
+    }
 
-      // 送信用キャンバス生成
+    // 判定用の低解像度ではなく、送信用に高画質で撮り直して送る
+    function sendFrame(frameForRef) {
+      state = 'SENDING';
+      lastSentFrame = frameForRef;
+      stillCount = 0;
+      setCamStatus('dot-indigo', 'AI 解析中…');
+      setPanel('…', '解析中');
+      ringProgress(1);
+
       const sw = video.videoWidth;
       const sh = video.videoHeight;
       const scale = Math.min(1, SEND_MAX_SIDE / Math.max(sw, sh));
-      const tw = Math.round(sw * scale);
-      const th = Math.round(sh * scale);
       const canvas = document.createElement('canvas');
-      canvas.width = tw;
-      canvas.height = th;
-      canvas.getContext('2d').drawImage(video, 0, 0, tw, th);
+      canvas.width  = Math.round(sw * scale);
+      canvas.height = Math.round(sh * scale);
+      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
       const imageData = canvas.toDataURL('image/jpeg', SEND_QUALITY);
 
-      // サムネイル更新
+      // 下部のサムネイル更新（何を送ったか確認できるように）
       const thumb = $('last-thumb');
       thumb.src = imageData;
       thumb.classList.remove('hidden');
       $('thumb-ph').classList.add('hidden');
-      $('last-time-label').textContent = `${new Date().getHours()}:${String(new Date().getMinutes()).padStart(2,'0')} 送信`;
+      const now = new Date();
+      $('last-time-label').textContent =
+        `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} 送信`;
 
       socket.emit('image_captured', { roomId, imageData }, (ack) => {
         if (ack?.error) {
-          scheduleNext();
+          // サーバー側のレート制限などで受け付けられなかった。基準は更新しないので後で再挑戦される
+          enterCooldown(COOLDOWN_MS);
           return;
         }
-        // サーバーがAI処理を開始したので、結果イベントを待つ（最大45秒）
         clearTimeout(resultWaitTimeout);
         resultWaitTimeout = setTimeout(() => {
-          if (processing) scheduleNext();
-        }, 45_000);
+          if (state === 'SENDING') {
+            setCamStatus('dot-red', '応答がありません — 再試行します');
+            enterCooldown(COOLDOWN_MS);
+          }
+        }, RESULT_WAIT_MS);
       });
+    }
+
+    // 送信直後の待機。連続でAPIを叩かないためのブレーキ
+    function enterCooldown(ms) {
+      state = 'COOLDOWN';
+      cooldownUntil = Date.now() + ms;
+      setCamStatus('dot-green', '待機中');
+      clearInterval(tickTimer);
+      tickTimer = setInterval(() => {
+        const remaining = Math.max(0, cooldownUntil - Date.now());
+        ringProgress(remaining / ms);
+        if (remaining <= 0) {
+          clearInterval(tickTimer);
+          ringProgress(0);
+          setPanel('◎', refFrame ? '同じ問題 — 変えると自動で解きます' : '問題をかざしてください');
+        } else {
+          setPanel(String(Math.ceil(remaining / 1000)), '次の判定まで');
+        }
+      }, 100);
+    }
+
+    // ── 表示ヘルパー ──────────────────────────────────────────────────────────
+    function setPanel(big, small) {
+      countdownLabel.textContent = big;
+      actionLabel.textContent = small;
+    }
+    // ratio: 1 = 満、0 = 空
+    function ringProgress(ratio) {
+      progressRing.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - ratio));
     }
 
     // ── ステータス ────────────────────────────────────────────────────────────

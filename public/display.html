@@ -4,10 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI解答システム</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- 外部CDNに依存しないよう同梱。CDN障害時でも画面が崩れない -->
+  <script src="vendor/tailwind.js"></script>
   <!-- 先頭に / を付けないこと。相対パスにしておくと、/ 直下でも /aas/ 配下でも動く -->
   <script src="socket.io/socket.io.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="vendor/qrcode.min.js"></script>
   <style>
     #answer-text { transition: font-size .2s ease; }
     .fade-in { animation: fadeIn .5s ease; }
@@ -122,8 +123,14 @@
       sessionStorage.setItem('ai_room_id', roomId);
       $('room-id-display').textContent = roomId;
       $('room-badge').textContent = roomId;
-      const exp = new Date(expiresAt);
-      $('expiry-display').textContent = `有効期限: ${exp.getHours()}:${String(exp.getMinutes()).padStart(2,'0')}`;
+      // expiresAt が null = 無期限（既定）。時間切れで勝手に終わらないので時刻を出さない
+      if (expiresAt) {
+        const exp = new Date(expiresAt);
+        $('expiry-display').textContent =
+          `有効期限: ${exp.getHours()}:${String(exp.getMinutes()).padStart(2, '0')}`;
+      } else {
+        $('expiry-display').textContent = 'この画面を閉じるまで有効';
+      }
 
       // 先にビューを表示してからQRコード生成（QR失敗でも画面が止まらないように）
       showView('waiting');
