@@ -11,17 +11,14 @@
 </head>
 <body class="bg-gray-950 text-gray-100 h-screen flex flex-col overflow-hidden select-none">
 
-  <!-- ルーム参加フォーム -->
-  <section id="join-view" class="flex-1 flex flex-col items-center justify-center p-8 gap-5">
+  <!-- QRスキャン待ち画面 (URLパラメータなし時) -->
+  <section id="scan-view" class="hidden flex-1 flex flex-col items-center justify-center p-8 gap-5">
+    <svg class="w-16 h-16 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.2">
+      <path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM19 15h2v2h-2zM15 19h2v2h-2zM19 19h2v2h-2z"/>
+    </svg>
     <h1 class="text-xl font-bold">AI 解答システム</h1>
-    <p class="text-gray-400 text-sm text-center">表示画面のQRコードをスキャンするか、<br>Room IDを入力して参加してください。</p>
-    <input id="room-input" type="text" maxlength="12" placeholder="Room ID"
-      class="w-full max-w-xs text-center uppercase tracking-[.3em] text-xl bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:border-indigo-500 placeholder-gray-600 font-mono">
-    <button id="join-btn"
-      class="w-full max-w-xs bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-bold py-3 rounded-xl transition-all">
-      参加する
-    </button>
-    <p id="join-error" class="text-red-400 text-sm hidden"></p>
+    <p class="text-gray-400 text-sm text-center">表示画面のQRコードをスキャンして<br>カメラを接続してください</p>
+    <p id="scan-error" class="text-red-400 text-sm text-center hidden"></p>
   </section>
 
   <!-- カメラビュー -->
@@ -106,7 +103,7 @@
 
     // ── DOM ───────────────────────────────────────────────────────────────────
     const $ = id => document.getElementById(id);
-    const joinView   = $('join-view');
+    const scanView   = $('scan-view');
     const cameraView = $('camera-view');
     const video      = $('video');
     const progressRing    = $('progress-ring');
@@ -141,24 +138,18 @@
     detectCanvas.height = DETECT_H;
     const detectCtx = detectCanvas.getContext('2d', { willReadFrequently: true });
 
-    // URLパラメータで自動参加
+    // URLパラメータで自動参加（QRコードスキャン時）
     const urlRoom = new URLSearchParams(location.search).get('room');
     if (urlRoom) {
-      $('room-input').value = urlRoom.toUpperCase();
-      window.addEventListener('load', () => setTimeout(connectSocket, 80));
+      window.addEventListener('load', () => setTimeout(() => connectSocket(urlRoom.toUpperCase()), 80));
+    } else {
+      // room パラメータなし → スキャン案内画面を表示
+      scanView.classList.remove('hidden');
     }
 
-    $('join-btn').addEventListener('click', connectSocket);
-    $('room-input').addEventListener('keydown', e => { if (e.key === 'Enter') connectSocket(); });
-
     // ── Socket接続 ────────────────────────────────────────────────────────────
-    function connectSocket() {
-      const id = $('room-input').value.trim().toUpperCase();
-      if (!id) { showJoinError('Room IDを入力してください。'); return; }
+    function connectSocket(id) {
       roomId = id;
-      $('join-error').classList.add('hidden');
-      $('join-btn').disabled = true;
-      $('join-btn').textContent = '接続中…';
 
       socket = io({ transports: ['websocket'], path: new URL('socket.io', location.href).pathname });
 
@@ -169,7 +160,7 @@
       socket.on('join_ack', ({ roomId: id }) => {
         joined = true;
         $('room-label').textContent = `Room: ${id}`;
-        joinView.classList.add('hidden');
+        scanView.classList.add('hidden');
         cameraView.classList.remove('hidden');
         cameraView.classList.add('flex');
         startCamera();
@@ -184,9 +175,10 @@
           }, 3000);
           return;
         }
-        $('join-btn').disabled = false;
-        $('join-btn').textContent = '参加する';
-        showJoinError(message);
+        // QR接続失敗 → スキャン案内画面にエラーを表示
+        scanView.classList.remove('hidden');
+        $('scan-error').textContent = message;
+        $('scan-error').classList.remove('hidden');
         socket.disconnect();
         socket = null;
       });
@@ -219,11 +211,6 @@
         // 通信エラー等は基準を更新しない → 待機後にそのまま再挑戦される
         enterCooldown(COOLDOWN_MS);
       });
-    }
-
-    function showJoinError(msg) {
-      $('join-error').textContent = msg;
-      $('join-error').classList.remove('hidden');
     }
 
     // ── カメラ起動 ────────────────────────────────────────────────────────────
