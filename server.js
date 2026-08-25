@@ -311,6 +311,12 @@ io.on('connection', (socket) => {
     console.log(`[room] camera joined: ${roomId}`);
   });
 
+  // Camera → Backend: カメラ状態通知（display へ中継するだけ）
+  socket.on('camera_state', (data) => {
+    const { roomId } = socket.data;
+    if (roomId) socket.to(roomId).emit('camera_state', data);
+  });
+
   // Camera → Backend: 画像送信
   socket.on('image_captured', async ({ roomId, imageData }, ack) => {
     const room = rooms.get(roomId);

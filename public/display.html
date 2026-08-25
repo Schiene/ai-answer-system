@@ -4,15 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI解答システム</title>
-  <!-- 外部CDNに依存しないよう同梱。CDN障害時でも画面が崩れない -->
   <script src="vendor/tailwind.js"></script>
-  <!-- 先頭に / を付けないこと。相対パスにしておくと、/ 直下でも /aas/ 配下でも動く -->
   <script src="socket.io/socket.io.js"></script>
   <script src="vendor/qrcode.min.js"></script>
   <style>
     #answer-text { transition: font-size .2s ease; }
-    .fade-in { animation: fadeIn .5s ease; }
-    @keyframes fadeIn { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
+    .fade-in { animation: fadeIn .4s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:scale(.96); } to { opacity:1; transform:scale(1); } }
+    #cd-bar { transition: width .15s linear; }
   </style>
 </head>
 <body class="bg-gray-950 text-white h-screen flex flex-col overflow-hidden">
@@ -23,7 +22,6 @@
       <span id="status-dot" class="w-2.5 h-2.5 rounded-full bg-gray-600"></span>
       <span id="status-text" class="text-sm text-gray-400">接続中…</span>
     </div>
-    <!-- フォントサイズコントロール -->
     <div id="size-controls" class="hidden items-center gap-1">
       <span class="text-xs text-gray-500 mr-1">文字サイズ</span>
       <button onclick="adjustSize(-1)"
@@ -35,9 +33,9 @@
     <span id="room-badge" class="hidden text-xs font-mono text-gray-600"></span>
   </header>
 
-  <!-- 待機ビュー -->
+  <!-- 待機ビュー（QRコード表示） -->
   <section id="waiting-view" class="hidden flex-1 flex flex-col items-center justify-center gap-5">
-    <p class="text-gray-500 text-sm tracking-widest uppercase">カメラ側で読み取ってください</p>
+    <p class="text-gray-500 text-sm tracking-widest uppercase">カメラ側でQRコードをスキャンしてください</p>
     <div id="qr-canvas" class="rounded-xl bg-white p-2.5"></div>
     <p id="qr-fallback" class="hidden text-xs text-gray-400 break-all text-center max-w-xs px-4"></p>
     <div class="text-center">
@@ -49,31 +47,44 @@
 
   <!-- 解析中ビュー -->
   <section id="processing-view" class="hidden flex-1 flex flex-col items-center justify-center gap-3">
-    <svg class="w-9 h-9 animate-spin text-indigo-500" fill="none" viewBox="0 0 24 24">
+    <svg class="w-10 h-10 animate-spin text-indigo-400" fill="none" viewBox="0 0 24 24">
       <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
       <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
     </svg>
-    <p class="text-gray-500 text-sm">AI が解析中…</p>
+    <p class="text-gray-400 text-sm">AI が問題を解析中…</p>
   </section>
 
   <!-- 答えビュー -->
   <section id="result-view" class="hidden flex-1 flex flex-col items-center justify-center p-8 gap-4">
-    <p id="answer-text" class="fade-in font-bold text-center leading-tight break-all text-white"></p>
-    <p id="error-text" class="hidden text-red-400 text-sm text-center"></p>
-
-    <!-- 履歴（最新5件、答えのみ） -->
-    <div id="history-bar" class="hidden mt-4">
+    <p id="answer-text" class="font-bold text-center leading-tight break-words text-white max-w-full"></p>
+    <p id="error-text" class="hidden text-red-400 text-sm text-center max-w-sm"></p>
+    <div id="history-bar" class="hidden mt-2">
       <div id="history-list" class="flex flex-wrap gap-2 justify-center"></div>
     </div>
   </section>
 
-  <!-- 接続エラートースト -->
-  <div id="toast" class="hidden fixed bottom-4 inset-x-4 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-300 text-center"></div>
+  <!-- カメラ状態フッター（カメラ接続後に表示） -->
+  <div id="cam-footer" class="hidden shrink-0 bg-gray-900 border-t border-gray-800">
+    <!-- クールダウン進捗バー -->
+    <div id="cd-bar-wrap" class="hidden h-1 bg-gray-800 overflow-hidden">
+      <div id="cd-bar" class="h-full bg-indigo-500 w-0"></div>
+    </div>
+    <div class="flex items-center justify-between px-4 py-2">
+      <div class="flex items-center gap-2 min-w-0">
+        <span id="cf-dot" class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
+        <span id="cf-text" class="text-xs text-gray-400 truncate">待機中</span>
+      </div>
+      <span id="cf-timer" class="text-xs font-mono text-gray-500 tabular-nums ml-3 shrink-0"></span>
+    </div>
+  </div>
+
+  <!-- トースト通知 -->
+  <div id="toast" class="hidden fixed bottom-4 inset-x-4 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-gray-300 text-center z-10"></div>
 
   <script>
     // ── フォントサイズ ─────────────────────────────────────────────────────────
-    const SIZE_STEPS = [2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]; // rem
-    let sizeIdx = parseInt(localStorage.getItem('answerSizeIdx') ?? '4'); // デフォルト 5rem
+    const SIZE_STEPS = [2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    let sizeIdx = parseInt(localStorage.getItem('answerSizeIdx') ?? '4');
     const answerText = document.getElementById('answer-text');
     const sizeLabel  = document.getElementById('size-label');
 
@@ -98,11 +109,10 @@
     const historyList    = $('history-list');
     const toast          = $('toast');
 
-    let history = []; // 最新5件の答え
+    let history = [];
 
     // ── Socket.io ─────────────────────────────────────────────────────────────
     const socket = io({ transports: ['websocket'], path: new URL('socket.io', location.href).pathname });
-    // sessionStorage: タブを閉じると消える（同タブ内の再接続には残る）
     let activeRoomId = sessionStorage.getItem('ai_room_id') || null;
 
     socket.on('connect', () => {
@@ -114,77 +124,69 @@
         socket.emit('create_room');
       }
     });
-    socket.on('disconnect', () => {
-      setStatus('dot-red', '切断 — 自動再接続中…');
-    });
+
+    socket.on('disconnect', () => setStatus('dot-red', '切断 — 自動再接続中…'));
 
     socket.on('room_created', ({ roomId, expiresAt }) => {
       activeRoomId = roomId;
       sessionStorage.setItem('ai_room_id', roomId);
       $('room-id-display').textContent = roomId;
       $('room-badge').textContent = roomId;
-      // expiresAt が null = 無期限（既定）。時間切れで勝手に終わらないので時刻を出さない
-      if (expiresAt) {
-        const exp = new Date(expiresAt);
-        $('expiry-display').textContent =
-          `有効期限: ${exp.getHours()}:${String(exp.getMinutes()).padStart(2, '0')}`;
-      } else {
-        $('expiry-display').textContent = 'この画面を閉じるまで有効';
-      }
+      $('expiry-display').textContent = expiresAt
+        ? `有効期限: ${new Date(expiresAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}`
+        : 'この画面を閉じるまで有効';
 
-      // 先にビューを表示してからQRコード生成（QR失敗でも画面が止まらないように）
       showView('waiting');
       setStatus('dot-yellow', 'カメラ接続待ち');
 
-      // location.origin だと /aas/ が抜けてしまうため、現在のページからの相対で組む
       const cameraUrl = new URL(`camera.html?room=${roomId}`, location.href).href;
       try {
         if (typeof QRCode !== 'undefined') {
           $('qr-canvas').innerHTML = '';
           new QRCode($('qr-canvas'), {
-            text: cameraUrl,
-            width: 200, height: 200,
+            text: cameraUrl, width: 200, height: 200,
             colorDark: '#000000', colorLight: '#ffffff',
             correctLevel: QRCode.CorrectLevel.H,
           });
         } else {
           _showQrFallback(cameraUrl);
         }
-      } catch (_) {
-        _showQrFallback(cameraUrl);
-      }
+      } catch (_) { _showQrFallback(cameraUrl); }
     });
 
     socket.on('camera_connected', () => {
       setStatus('dot-green', 'カメラ接続済み');
       $('room-badge').classList.remove('hidden');
       showView('result');
-      $('answer-text').textContent = '問題用紙をかざしてください';
-      $('answer-text').classList.remove('fade-in');
+      answerText.textContent = '問題用紙をかざしてください';
+      answerText.classList.remove('fade-in');
       sizeControls.classList.remove('hidden');
       sizeControls.classList.add('flex');
+      setFooter('emerald', '問題をかざすと自動で解析します');
+      stopCooldown();
     });
 
     socket.on('camera_disconnected', () => {
       setStatus('dot-yellow', 'カメラ切断 — 再接続待ち');
+      setFooter('red', 'カメラが切断されました — スマホのページを確認してください');
+      stopCooldown();
       showToast('カメラが切断されました。');
     });
 
     socket.on('ai_processing_start', () => {
       showView('processing');
       setStatus('dot-indigo', 'AI 解析中…');
+      setFooter('indigo', 'AI が問題を解析中…');
+      stopCooldown();
     });
 
     socket.on('ai_result_ready', ({ answer }) => {
       showView('result');
       $('error-text').classList.add('hidden');
-
-      // フェードイン再トリガー
       answerText.classList.remove('fade-in');
       void answerText.offsetWidth;
       answerText.classList.add('fade-in');
       answerText.textContent = answer;
-
       pushHistory(answer);
       setStatus('dot-green', '解答完了');
     });
@@ -195,6 +197,20 @@
       $('error-text').textContent = message;
       $('error-text').classList.remove('hidden');
       setStatus('dot-red', 'AIエラー');
+      setFooter('red', 'エラーが発生しました — 次の解析まで待機中');
+    });
+
+    socket.on('camera_state', ({ phase, ms }) => {
+      if (phase === 'idle') {
+        setFooter('emerald', '問題をかざすと自動で解析します');
+        stopCooldown();
+      } else if (phase === 'settling') {
+        setFooter('indigo', '変化を検知 — カメラが静止するのを確認中…');
+        stopCooldown();
+      } else if (phase === 'cooldown') {
+        setFooter('emerald', '解析完了 — 次の問題をかざしてください');
+        startCooldown(ms || 10000);
+      }
     });
 
     socket.on('error_occurred', ({ message }) => showToast(message));
@@ -204,6 +220,60 @@
       showToast('ルームの有効期限が切れました。ページを再読み込みしてください。');
       setStatus('dot-red', '期限切れ');
     });
+
+    // ── カメラ状態フッター ────────────────────────────────────────────────────
+    let cdTimer = null;
+
+    const DOT_BG = {
+      emerald: 'bg-emerald-400',
+      indigo:  'bg-indigo-400',
+      yellow:  'bg-yellow-400',
+      red:     'bg-red-400',
+      gray:    'bg-gray-500',
+    };
+    const BAR_BG = {
+      emerald: 'bg-indigo-500',
+      indigo:  'bg-indigo-500',
+      red:     'bg-red-500',
+    };
+
+    function setFooter(color, text) {
+      $('cam-footer').classList.remove('hidden');
+      $('cf-dot').className = `w-2 h-2 rounded-full shrink-0 ${DOT_BG[color] || DOT_BG.gray}`;
+      $('cf-text').textContent = text;
+    }
+
+    function startCooldown(ms) {
+      const bar = $('cd-bar');
+      const wrap = $('cd-bar-wrap');
+      const end = Date.now() + ms;
+
+      bar.style.transition = 'none';
+      bar.style.width = '0%';
+      wrap.classList.remove('hidden');
+
+      clearInterval(cdTimer);
+      cdTimer = setInterval(() => {
+        const remaining = Math.max(0, end - Date.now());
+        const pct = (1 - remaining / ms) * 100;
+        bar.style.transition = 'width .15s linear';
+        bar.style.width = pct + '%';
+        $('cf-timer').textContent = remaining > 0 ? `あと ${Math.ceil(remaining / 1000)}秒` : '';
+        if (remaining === 0) {
+          clearInterval(cdTimer);
+          wrap.classList.add('hidden');
+          bar.style.width = '0%';
+          $('cf-timer').textContent = '';
+        }
+      }, 100);
+    }
+
+    function stopCooldown() {
+      clearInterval(cdTimer);
+      $('cd-bar-wrap').classList.add('hidden');
+      $('cd-bar').style.width = '0%';
+      $('cf-timer').textContent = '';
+    }
 
     // ── UI ───────────────────────────────────────────────────────────────────
     function showView(name) {

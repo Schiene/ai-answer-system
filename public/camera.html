@@ -243,6 +243,11 @@
       detectTimer = setInterval(detectTick, DETECT_INTERVAL_MS);
       setPanel('—', '問題をかざしてください');
       ringProgress(0);
+      emitState('idle');
+    }
+
+    function emitState(phase, extra) {
+      if (socket && roomId) socket.emit('camera_state', { phase, ...extra });
     }
 
     // 今の映像を「小さな白黒の数値配列」にする。比較を軽くするための下準備
@@ -286,6 +291,7 @@
           stillCount = 0;
           setCamStatus('dot-indigo', '変化を検知');
           setPanel('…', '静止を待っています');
+          emitState('settling');
         } else {
           setPanel('◎', '同じ問題 — 変えると自動で解きます');
         }
@@ -353,6 +359,7 @@
       state = 'COOLDOWN';
       cooldownUntil = Date.now() + ms;
       setCamStatus('dot-green', '待機中');
+      emitState('cooldown', { ms });
       clearInterval(tickTimer);
       tickTimer = setInterval(() => {
         const remaining = Math.max(0, cooldownUntil - Date.now());
@@ -361,6 +368,7 @@
           clearInterval(tickTimer);
           ringProgress(0);
           setPanel('◎', refFrame ? '同じ問題 — 変えると自動で解きます' : '問題をかざしてください');
+          emitState('idle');
         } else {
           setPanel(String(Math.ceil(remaining / 1000)), '次の判定まで');
         }
