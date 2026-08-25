@@ -4,14 +4,17 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>AI解答システム - カメラ</title>
-  <!-- 外部CDNに依存しないよう同梱。CDN障害時でも画面が崩れない -->
   <script src="vendor/tailwind.js"></script>
-  <!-- 先頭に / を付けないこと。相対パスにしておくと、/ 直下でも /aas/ 配下でも動く -->
   <script src="socket.io/socket.io.js"></script>
+  <style>
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    #manual-btn { -webkit-tap-highlight-color: transparent; }
+  </style>
 </head>
 <body class="bg-gray-950 text-gray-100 h-screen flex flex-col overflow-hidden select-none">
 
-  <!-- QRスキャン待ち画面 (URLパラメータなし時) -->
+  <!-- QRスキャン待ち画面 -->
   <section id="scan-view" class="hidden flex-1 flex flex-col items-center justify-center p-8 gap-5">
     <svg class="w-16 h-16 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.2">
       <path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM19 15h2v2h-2zM15 19h2v2h-2zM19 19h2v2h-2z"/>
@@ -23,6 +26,7 @@
 
   <!-- カメラビュー -->
   <section id="camera-view" class="hidden flex-1 flex flex-col">
+
     <!-- ステータスバー -->
     <div class="shrink-0 flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">
       <div class="flex items-center gap-2">
@@ -32,32 +36,47 @@
       <span id="room-label" class="text-xs font-mono text-gray-500"></span>
     </div>
 
-    <!-- ビデオ -->
+    <!-- 科目選択バー -->
+    <div class="shrink-0 bg-gray-950 border-b border-gray-800 overflow-x-auto no-scrollbar" style="-webkit-overflow-scrolling:touch">
+      <div id="subject-bar" class="flex gap-1.5 px-3 py-2 w-max"></div>
+    </div>
+
+    <!-- ビデオ + オーバーレイ -->
     <div class="relative flex-1 bg-black overflow-hidden">
       <video id="video" class="w-full h-full object-cover" autoplay playsinline muted></video>
-      <!-- ピントが合わない時のヒント -->
+
+      <!-- ピントヒント -->
       <p class="absolute top-3 inset-x-0 text-center text-xs text-white/40 pointer-events-none">ぼやける場合は画面をタップ</p>
 
-      <!-- カウントダウンオーバーレイ -->
-      <div class="absolute inset-0 flex items-end justify-center pb-6 pointer-events-none">
-        <div class="bg-black/60 rounded-2xl px-6 py-3 flex items-center gap-4">
-          <!-- 円形進捗 -->
-          <svg class="w-12 h-12 -rotate-90" viewBox="0 0 40 40">
+      <!-- 手動送信ボタン（中央大） -->
+      <button id="manual-btn" onclick="manualSend()"
+        class="absolute inset-0 m-auto w-24 h-24 rounded-full bg-white/15 border-2 border-white/40 flex items-center justify-center active:scale-90 active:bg-white/30 transition-all duration-100">
+        <svg class="w-10 h-10 text-white drop-shadow" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
+        </svg>
+      </button>
+
+      <!-- カウントダウンオーバーレイ（左下） -->
+      <div class="absolute bottom-5 left-4 pointer-events-none">
+        <div class="bg-black/60 rounded-2xl px-4 py-2.5 flex items-center gap-3">
+          <svg class="w-10 h-10 -rotate-90" viewBox="0 0 40 40">
             <circle cx="20" cy="20" r="17" fill="none" stroke="#374151" stroke-width="4"/>
             <circle id="progress-ring" cx="20" cy="20" r="17" fill="none" stroke="#6366f1" stroke-width="4"
               stroke-linecap="round"
               style="stroke-dasharray:107;stroke-dashoffset:107;transition:stroke-dashoffset .2s linear"/>
           </svg>
           <div>
-            <p id="countdown-label" class="text-2xl font-bold font-mono text-white">10</p>
-            <p id="action-label" class="text-xs text-gray-400">次の解析まで</p>
+            <p id="countdown-label" class="text-xl font-bold font-mono text-white leading-none">—</p>
+            <p id="action-label" class="text-xs text-gray-400 mt-0.5">問題をかざしてください</p>
           </div>
         </div>
       </div>
     </div>
 
     <!-- 下部サムネイル -->
-    <div class="shrink-0 flex items-center gap-3 px-4 py-3 bg-gray-900 border-t border-gray-800">
+    <div class="shrink-0 flex items-center gap-3 px-4 py-2.5 bg-gray-900 border-t border-gray-800">
       <div>
         <p class="text-xs text-gray-500 mb-1">最後の送信</p>
         <img id="last-thumb" src="" alt=""
@@ -72,87 +91,94 @@
 
   <script>
     // ── 設定 ──────────────────────────────────────────────────────────────────
-    //
-    // 撮影の考え方（2026-07-30 変更。以前は20秒ごとの固定間隔だった）
-    //   「同じ問題を写している間は何もせず、別の問題に切り替わったときだけ解く」
-    //
-    //   1. 小さな白黒画像を DETECT_INTERVAL_MS ごとに取り込む（軽い処理）
-    //   2. 「最後に送った画像」と比べて CHANGE_THRESHOLD 以上違う → 問題が変わった
-    //   3. 直前のコマとの差が STILL_THRESHOLD 以下 が STILL_FRAMES_REQUIRED 回続く
-    //      → 紙が静止した。ここで初めて高画質で撮って送る（手ブレ画像を送らない）
-    //   4. 送った画像を新しい基準にする → 同じ問題では二度と反応しない
-    //
-    const SEND_MAX_SIDE   = 1280;   // 送信画像の最大辺
-    const SEND_QUALITY    = 0.75;   // JPEG圧縮品質
-
-    const DETECT_INTERVAL_MS = 400; // 変化を見にいく間隔
-    const DETECT_W = 160;           // 判定用の縮小サイズ（小さいほど軽く、ノイズに鈍い）
+    const SEND_MAX_SIDE   = 1280;
+    const SEND_QUALITY    = 0.75;
+    const DETECT_INTERVAL_MS = 400;
+    const DETECT_W = 160;
     const DETECT_H = 120;
-
-    // 0〜255 の平均差で判定する。数字を上げると鈍感に、下げると敏感になる。
-    const CHANGE_THRESHOLD = 20;    // これ以上違えば「別の問題」（手ブレ程度では反応しない）
-    const STILL_THRESHOLD  = 8;     // これ以下なら「静止している」（微振動を許容）
-    const STILL_FRAMES_REQUIRED = 4;// 静止が何コマ続いたら送るか（4コマ ≒ 1.6秒）
-
-    // 送信後の待機。サーバー側のレート制限(RATE_LIMIT_SECONDS)と揃えておく
+    const CHANGE_THRESHOLD = 20;
+    const STILL_THRESHOLD  = 8;
+    const STILL_FRAMES_REQUIRED = 4;
     const COOLDOWN_MS = 10_000;
-    // 「読み取り不可」が続いたときに、無駄な送信を繰り返さないための上限
     const MAX_UNREADABLE_STREAK = 3;
-    // サーバーから結果が返らなかったときの保険（サーバー側は30秒で打ち切る）
     const RESULT_WAIT_MS = 60_000;
+    const RING_CIRCUMFERENCE = 107;
 
-    const RING_CIRCUMFERENCE = 107; // r=17 の円周 ≈ 2πr
+    // ── 科目リスト ────────────────────────────────────────────────────────────
+    const SUBJECTS = [
+      '法学', '心理学', '経済学', '経営学', '社会学', '政治学',
+      '哲学', '文学', '歴史学', '教育学', '国際関係学',
+      '数学', '統計学', '物理学', '化学', '生物学',
+      '情報科学', '工学', '医学・看護', '環境学', '福祉学',
+    ];
+    let currentSubject = localStorage.getItem('aas_subject') || '';
 
     // ── DOM ───────────────────────────────────────────────────────────────────
     const $ = id => document.getElementById(id);
     const scanView   = $('scan-view');
     const cameraView = $('camera-view');
     const video      = $('video');
-    const progressRing    = $('progress-ring');
-    const countdownLabel  = $('countdown-label');
-    const actionLabel     = $('action-label');
+    const progressRing   = $('progress-ring');
+    const countdownLabel = $('countdown-label');
+    const actionLabel    = $('action-label');
+
+    // ── 科目バー描画 ──────────────────────────────────────────────────────────
+    function renderSubjectBar() {
+      const bar = $('subject-bar');
+      bar.innerHTML = '';
+      const makeChip = (label, value) => {
+        const btn = document.createElement('button');
+        const active = currentSubject === value;
+        btn.className = `shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+          active ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 active:bg-gray-700'}`;
+        btn.textContent = label;
+        btn.onclick = () => selectSubject(value);
+        return btn;
+      };
+      bar.appendChild(makeChip('なし', ''));
+      SUBJECTS.forEach(s => bar.appendChild(makeChip(s, s)));
+    }
+
+    function selectSubject(value) {
+      currentSubject = value;
+      localStorage.setItem('aas_subject', value);
+      renderSubjectBar();
+    }
+
+    renderSubjectBar();
 
     // ── 状態 ──────────────────────────────────────────────────────────────────
     let socket            = null;
     let roomId            = null;
-    let detectTimer       = null;  // 変化検知ループ
-    let tickTimer         = null;  // クールダウンの表示更新
-    let resultWaitTimeout = null;  // AI結果待ちの保険
+    let detectTimer       = null;
+    let tickTimer         = null;
+    let resultWaitTimeout = null;
+    let wakeLock          = null;
 
-    // 撮影の状態機械
-    //   FIRST    : まだ一度も送っていない。静止したら1枚送る
-    //   IDLE     : 送信済み。基準と違う画になるまで何もしない
-    //   SETTLING : 変化を検知した。静止するのを待っている
-    //   SENDING  : 送信してAIの結果を待っている
-    //   COOLDOWN : 送信直後の待機中
     let state = 'FIRST';
-
-    let refFrame  = null;   // 最後に送った画（この画と比べて「変わったか」を判断する）
-    let prevFrame = null;   // 直前のコマ（この画と比べて「静止したか」を判断する）
+    let refFrame  = null;
+    let prevFrame = null;
     let stillCount = 0;
     let unreadableStreak = 0;
     let cooldownUntil = 0;
-    let lastSentFrame = null;   // 送信中の画。結果が返ってきたら refFrame にする
+    let lastSentFrame = null;
 
-    // 判定用の縮小キャンバス（使い回してメモリを無駄にしない）
     const detectCanvas = document.createElement('canvas');
     detectCanvas.width  = DETECT_W;
     detectCanvas.height = DETECT_H;
     const detectCtx = detectCanvas.getContext('2d', { willReadFrequently: true });
 
-    // URLパラメータで自動参加（QRコードスキャン時）
+    // ── QR / URL パラメータ ───────────────────────────────────────────────────
     const urlRoom = new URLSearchParams(location.search).get('room');
     if (urlRoom) {
       window.addEventListener('load', () => setTimeout(() => connectSocket(urlRoom.toUpperCase()), 80));
     } else {
-      // room パラメータなし → スキャン案内画面を表示
       scanView.classList.remove('hidden');
     }
 
     // ── Socket接続 ────────────────────────────────────────────────────────────
     function connectSocket(id) {
       roomId = id;
-
       socket = io({ transports: ['websocket'], path: new URL('socket.io', location.href).pathname });
 
       let joined = false;
@@ -170,14 +196,10 @@
 
       socket.on('error_occurred', ({ message }) => {
         if (joined) {
-          // 再接続後のルーム参加失敗 → ディスプレイ側の再作成を待ってリトライ
           setCamStatus('dot-yellow', '再接続中…');
-          setTimeout(() => {
-            if (socket) socket.emit('join_room', { roomId });
-          }, 3000);
+          setTimeout(() => { if (socket) socket.emit('join_room', { roomId }); }, 3000);
           return;
         }
-        // QR接続失敗 → スキャン案内画面にエラーを表示
         scanView.classList.remove('hidden');
         $('scan-error').textContent = message;
         $('scan-error').classList.remove('hidden');
@@ -187,11 +209,9 @@
 
       socket.on('disconnect', () => setCamStatus('dot-red', '切断 — 自動再接続中…'));
 
-      // AI結果を受け取り、次の検知を再開するタイミングを決める
       socket.on('ai_result_ready', () => {
         clearTimeout(resultWaitTimeout);
         unreadableStreak = 0;
-        // 送った画を新しい基準にする → この問題を写している間はもう反応しない
         if (lastSentFrame) refFrame = lastSentFrame;
         enterCooldown(COOLDOWN_MS);
       });
@@ -200,17 +220,12 @@
         clearTimeout(resultWaitTimeout);
         if (unreadable) {
           unreadableStreak++;
-          // 基準をあえて更新しない = 同じ問題でも再挑戦する。
-          // ピントが合った瞬間や影が外れた瞬間に拾えるようにするため。
           if (unreadableStreak >= MAX_UNREADABLE_STREAK) {
-            // 何も写っていない場所に向け続けている可能性が高い。
-            // 基準を今の画にして、はっきり変化があるまで待つ（無駄な送信を止める）。
             if (lastSentFrame) refFrame = lastSentFrame;
             unreadableStreak = 0;
             setCamStatus('dot-yellow', '読み取れません — 問題を写し直してください');
           }
         }
-        // 通信エラー等は基準を更新しない → 待機後にそのまま再挑戦される
         enterCooldown(COOLDOWN_MS);
       });
     }
@@ -226,11 +241,13 @@
         video.srcObject = stream;
         await new Promise(r => (video.onloadedmetadata = r));
 
-        // 連続オートフォーカスを要求（Android Chromeで有効。iOS Safariは非対応だが無視される）
+        // 連続オートフォーカス（Android有効、iOS非対応だが無視される）
         try {
-          const track = stream.getVideoTracks()[0];
-          await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-        } catch (_) { /* 非対応デバイスは無視 */ }
+          await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+        } catch (_) {}
+
+        // スリープ防止
+        await requestWakeLock();
 
         setCamStatus('dot-green', '撮影中');
         startCaptureLoop();
@@ -240,6 +257,21 @@
         countdownLabel.textContent = '—';
       }
     }
+
+    // ── スリープ防止 ──────────────────────────────────────────────────────────
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } catch (_) {}
+    }
+    // タブが前面に戻ったとき再取得
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !wakeLock && video.srcObject) {
+        requestWakeLock();
+      }
+    });
 
     // ── 変化検知ループ ────────────────────────────────────────────────────────
     function startCaptureLoop() {
@@ -259,19 +291,16 @@
       if (socket && roomId) socket.emit('camera_state', { phase, ...extra });
     }
 
-    // 今の映像を「小さな白黒の数値配列」にする。比較を軽くするための下準備
     function grabFrame() {
       detectCtx.drawImage(video, 0, 0, DETECT_W, DETECT_H);
       const { data } = detectCtx.getImageData(0, 0, DETECT_W, DETECT_H);
       const gray = new Uint8Array(DETECT_W * DETECT_H);
       for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-        // 人の目の感度に合わせた重み付けで明るさに変換
         gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
       }
       return gray;
     }
 
-    // 2枚の画の違いを 0〜255 の平均で返す。片方が無ければ「全く違う」扱い
     function meanAbsDiff(a, b) {
       if (!a || !b) return 255;
       let sum = 0;
@@ -281,19 +310,18 @@
 
     function detectTick() {
       if (video.readyState < 2 || !socket || !roomId) return;
-      if (state === 'SENDING') return;              // 結果待ち中は何もしない
+      if (state === 'SENDING') return;
 
       if (state === 'COOLDOWN') {
-        if (Date.now() < cooldownUntil) return;     // 残り時間の表示は enterCooldown 側が担当
+        if (Date.now() < cooldownUntil) return;
         state = refFrame ? 'IDLE' : 'FIRST';
         setCamStatus('dot-green', '待機中');
       }
 
       const frame = grabFrame();
-      const diffPrev = meanAbsDiff(frame, prevFrame);   // 直前のコマとの差 = 動いているか
+      const diffPrev = meanAbsDiff(frame, prevFrame);
       prevFrame = frame;
 
-      // 送信済み: 基準と比べて「別の問題になったか」だけを見る
       if (state === 'IDLE') {
         if (meanAbsDiff(frame, refFrame) > CHANGE_THRESHOLD) {
           state = 'SETTLING';
@@ -307,7 +335,6 @@
         return;
       }
 
-      // 初回、または変化を検知した直後: 静止するまで待ってから送る
       if (state === 'FIRST' || state === 'SETTLING') {
         if (diffPrev <= STILL_THRESHOLD) {
           stillCount++;
@@ -320,7 +347,7 @@
       }
     }
 
-    // 判定用の低解像度ではなく、送信用に高画質で撮り直して送る
+    // ── 送信 ─────────────────────────────────────────────────────────────────
     function sendFrame(frameForRef) {
       state = 'SENDING';
       lastSentFrame = frameForRef;
@@ -328,9 +355,9 @@
       setCamStatus('dot-indigo', 'AI 解析中…');
       setPanel('…', '解析中');
       ringProgress(1);
+      setManualBtnState(false);
 
-      const sw = video.videoWidth;
-      const sh = video.videoHeight;
+      const sw = video.videoWidth, sh = video.videoHeight;
       const scale = Math.min(1, SEND_MAX_SIDE / Math.max(sw, sh));
       const canvas = document.createElement('canvas');
       canvas.width  = Math.round(sw * scale);
@@ -338,21 +365,16 @@
       canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
       const imageData = canvas.toDataURL('image/jpeg', SEND_QUALITY);
 
-      // 下部のサムネイル更新（何を送ったか確認できるように）
       const thumb = $('last-thumb');
       thumb.src = imageData;
       thumb.classList.remove('hidden');
       $('thumb-ph').classList.add('hidden');
       const now = new Date();
       $('last-time-label').textContent =
-        `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')} 送信`;
+        `${now.getHours()}:${String(now.getMinutes()).padStart(2,'0')} 送信`;
 
-      socket.emit('image_captured', { roomId, imageData }, (ack) => {
-        if (ack?.error) {
-          // サーバー側のレート制限などで受け付けられなかった。基準は更新しないので後で再挑戦される
-          enterCooldown(COOLDOWN_MS);
-          return;
-        }
+      socket.emit('image_captured', { roomId, imageData, subject: currentSubject }, (ack) => {
+        if (ack?.error) { enterCooldown(COOLDOWN_MS); return; }
         clearTimeout(resultWaitTimeout);
         resultWaitTimeout = setTimeout(() => {
           if (state === 'SENDING') {
@@ -363,11 +385,31 @@
       });
     }
 
-    // 送信直後の待機。連続でAPIを叩かないためのブレーキ
+    // ── 手動送信 ─────────────────────────────────────────────────────────────
+    function manualSend() {
+      if (state === 'SENDING' || video.readyState < 2) return;
+      clearTimeout(resultWaitTimeout);
+      clearInterval(tickTimer);
+      // 前の基準をリセットして強制的に「新しい問題」として送る
+      const frame = grabFrame();
+      sendFrame(frame);
+    }
+
+    function setManualBtnState(enabled) {
+      const btn = $('manual-btn');
+      if (enabled) {
+        btn.classList.remove('opacity-30', 'pointer-events-none');
+      } else {
+        btn.classList.add('opacity-30', 'pointer-events-none');
+      }
+    }
+
+    // ── クールダウン ──────────────────────────────────────────────────────────
     function enterCooldown(ms) {
       state = 'COOLDOWN';
       cooldownUntil = Date.now() + ms;
       setCamStatus('dot-green', '待機中');
+      setManualBtnState(true);
       emitState('cooldown', { ms });
       clearInterval(tickTimer);
       tickTimer = setInterval(() => {
@@ -389,12 +431,10 @@
       countdownLabel.textContent = big;
       actionLabel.textContent = small;
     }
-    // ratio: 1 = 満、0 = 空
     function ringProgress(ratio) {
       progressRing.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - ratio));
     }
 
-    // ── ステータス ────────────────────────────────────────────────────────────
     const DOT_COLORS = {
       'dot-yellow': 'bg-yellow-400',
       'dot-green':  'bg-emerald-400',
@@ -405,6 +445,9 @@
       $('cam-dot').className = `w-2.5 h-2.5 rounded-full ${DOT_COLORS[dot] || 'bg-gray-500'}`;
       $('cam-status').textContent = text;
     }
+
+    // 初期状態: 手動ボタンは有効
+    setManualBtnState(true);
   </script>
 </body>
 </html>

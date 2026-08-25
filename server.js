@@ -136,10 +136,13 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function analyzeImage(base64Jpeg) {
+async function analyzeImage(base64Jpeg, subject) {
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  const subjectLine = subject
+    ? `あなたは大学の「${subject}」の専門家として問題を解いてください。\n`
+    : '';
   const call = () => withTimeout(model.generateContent([
-    `画像に写っている問題を解いてください。
+    `${subjectLine}画像に写っている問題を解いてください。
 選択肢（①②③④、ア・イ・ウ・エ、A・B・C・D、1・2・3・4など）がある場合は、上から数えて正解が何番目かを数字（1、2、3、4）のみで答えてください。
 選択肢がない問題は答えだけを簡潔に出力してください。解説・問題文は不要です。
 問題が読み取れない・写っていない場合は「読み取り不可」とだけ出力してください。`,
@@ -318,7 +321,7 @@ io.on('connection', (socket) => {
   });
 
   // Camera → Backend: 画像送信
-  socket.on('image_captured', async ({ roomId, imageData }, ack) => {
+  socket.on('image_captured', async ({ roomId, imageData, subject }, ack) => {
     const room = rooms.get(roomId);
     if (!room) {
       if (ack) ack({ error: 'ROOM_NOT_FOUND' });
@@ -337,7 +340,7 @@ io.on('connection', (socket) => {
 
     try {
       const base64 = imageData.replace(/^data:image\/\w+;base64,/, '');
-      const result = await analyzeImage(base64);
+      const result = await analyzeImage(base64, subject || '');
       io.to(roomId).emit('ai_result_ready', result);
       console.log(`[ai] result sent to room: ${roomId}`);
     } catch (err) {
