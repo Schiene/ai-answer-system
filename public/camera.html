@@ -35,6 +35,8 @@
     <!-- ビデオ -->
     <div class="relative flex-1 bg-black overflow-hidden">
       <video id="video" class="w-full h-full object-cover" autoplay playsinline muted></video>
+      <!-- ピントが合わない時のヒント -->
+      <p class="absolute top-3 inset-x-0 text-center text-xs text-white/40 pointer-events-none">ぼやける場合は画面をタップ</p>
 
       <!-- カウントダウンオーバーレイ -->
       <div class="absolute inset-0 flex items-end justify-center pb-6 pointer-events-none">
@@ -223,6 +225,13 @@
         });
         video.srcObject = stream;
         await new Promise(r => (video.onloadedmetadata = r));
+
+        // 連続オートフォーカスを要求（Android Chromeで有効。iOS Safariは非対応だが無視される）
+        try {
+          const track = stream.getVideoTracks()[0];
+          await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+        } catch (_) { /* 非対応デバイスは無視 */ }
+
         setCamStatus('dot-green', '撮影中');
         startCaptureLoop();
       } catch (err) {
