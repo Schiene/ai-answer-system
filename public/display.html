@@ -16,6 +16,11 @@
 </head>
 <body class="bg-gray-950 text-white h-screen flex flex-col overflow-hidden">
 
+  <!-- クールダウン進捗バー（画面上部、太め） -->
+  <div id="cd-bar-wrap" class="hidden shrink-0 h-4 bg-gray-800 overflow-hidden">
+    <div id="cd-bar" class="h-full bg-indigo-500 w-0"></div>
+  </div>
+
   <!-- ステータスバー -->
   <header class="shrink-0 flex items-center justify-between px-5 py-2.5 bg-gray-900 border-b border-gray-800">
     <div class="flex items-center gap-2">
@@ -65,10 +70,6 @@
 
   <!-- カメラ状態フッター（カメラ接続後に表示） -->
   <div id="cam-footer" class="hidden shrink-0 bg-gray-900 border-t border-gray-800">
-    <!-- クールダウン進捗バー -->
-    <div id="cd-bar-wrap" class="hidden h-1 bg-gray-800 overflow-hidden">
-      <div id="cd-bar" class="h-full bg-indigo-500 w-0"></div>
-    </div>
     <div class="flex items-center justify-between px-4 py-2">
       <div class="flex items-center gap-2 min-w-0">
         <span id="cf-dot" class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
