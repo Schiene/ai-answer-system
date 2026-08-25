@@ -90,9 +90,9 @@
     const DETECT_H = 120;
 
     // 0〜255 の平均差で判定する。数字を上げると鈍感に、下げると敏感になる。
-    const CHANGE_THRESHOLD = 12;    // これ以上違えば「別の問題」
-    const STILL_THRESHOLD  = 4;     // これ以下なら「静止している」
-    const STILL_FRAMES_REQUIRED = 3;// 静止が何コマ続いたら送るか（3コマ ≒ 1.2秒）
+    const CHANGE_THRESHOLD = 20;    // これ以上違えば「別の問題」（手ブレ程度では反応しない）
+    const STILL_THRESHOLD  = 8;     // これ以下なら「静止している」（微振動を許容）
+    const STILL_FRAMES_REQUIRED = 4;// 静止が何コマ続いたら送るか（4コマ ≒ 1.6秒）
 
     // 送信後の待機。サーバー側のレート制限(RATE_LIMIT_SECONDS)と揃えておく
     const COOLDOWN_MS = 10_000;
